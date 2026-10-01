@@ -20,5 +20,5 @@ class EvidenceReference:
             raise ValueError("Los identificadores deben ser positivos")
         if not self.bucket or not self.object_key:
             raise ValueError("La evidencia necesita bucket y object_key")
-        if self.mime_type not in {"image/jpeg", "image/png", "image/webp"}:
-            raise ValueError("Tipo de imagen no admitido")
+        if not self.mime_type or "/" not in self.mime_type:
+            raise ValueError("mime_type inválido")

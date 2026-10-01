@@ -8,6 +8,7 @@ from hashlib import sha256
 from app.application.ports.evidence_reader import EvidenceReader
 from app.application.ports.result_sink import ResultSink
 from app.application.ports.scene_analyzer import SceneAnalyzer
+from app.application.pipelines.image_pipeline import validate_image_type
 from app.domain.analysis_result import AnalysisResult
 from app.domain.evidence_reference import EvidenceReference
 
@@ -30,6 +31,7 @@ class AnalyzeEvidence:
     async def execute(self, job_id: str, evidence: EvidenceReference) -> AnalysisResult:
         if not job_id.strip():
             raise ValueError("job_id es obligatorio")
+        validate_image_type(evidence.mime_type)
 
         image = await self.reader.read(evidence)
         if not image:
