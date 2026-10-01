@@ -11,8 +11,8 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "pydantic-settings>=2",
-    "boto3>=1.35,<2",
-    "httpx>=0.27,<1"
+    "httpx>=0.27,<1",
+    "python-dotenv>=1,<2"
 ]
 
 [tool.setuptools.packages.find]

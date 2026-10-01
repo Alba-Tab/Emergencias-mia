@@ -10,15 +10,14 @@ class EvidenceReference:
     evidence_id: int
     alert_id: int
     incident_id: int
-    bucket: str
-    object_key: str
+    download_url: str
     mime_type: str
     checksum_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if min(self.evidence_id, self.alert_id, self.incident_id) <= 0:
             raise ValueError("Los identificadores deben ser positivos")
-        if not self.bucket or not self.object_key:
-            raise ValueError("La evidencia necesita bucket y object_key")
+        if not self.download_url:
+            raise ValueError("La evidencia necesita download_url")
         if not self.mime_type or "/" not in self.mime_type:
             raise ValueError("mime_type inválido")

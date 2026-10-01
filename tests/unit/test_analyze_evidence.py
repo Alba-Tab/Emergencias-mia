@@ -49,8 +49,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
             evidence_id=3,
             alert_id=2,
             incident_id=1,
-            bucket="private-evidence",
-            object_key="evidencias/1/2/3",
+            download_url="https://objects.example/evidencias/1/2/3",
             mime_type="image/jpeg",
         )
         self.reader = Reader(b"\xff\xd8\xffimage-bytes")
@@ -97,7 +96,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.reader.calls, 0)
 
     async def test_rejects_unimplemented_modality_before_reading(self) -> None:
-        evidence = EvidenceReference(3, 2, 1, "private-evidence", "key", "video/mp4")
+        evidence = EvidenceReference(3, 2, 1, "https://objects.example/key", "video/mp4")
         with self.assertRaisesRegex(ValueError, "Modalidad no implementada"):
             await self.use_case.execute("job-1", evidence)
         self.assertEqual(self.reader.calls, 0)
@@ -115,7 +114,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.use_case = AnalyzeEvidence({"audio": FakeModalityAnalyzer(), "video": FakeModalityAnalyzer()}, self.sink)
         for mime_type in ("audio/wav", "video/mp4"):
-            evidence = EvidenceReference(3, 2, 1, "private-evidence", "key", mime_type)
+            evidence = EvidenceReference(3, 2, 1, "https://objects.example/key", mime_type)
             await self.use_case.execute("job-1", evidence)
         self.assertEqual(calls, ["audio/wav", "video/mp4"])
         self.assertEqual(len(self.sink.results), 2)
@@ -125,8 +124,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
             evidence_id=3,
             alert_id=2,
             incident_id=1,
-            bucket="private-evidence",
-            object_key="evidencias/1/2/3",
+            download_url="https://objects.example/evidencias/1/2/3",
             mime_type="image/jpeg",
             checksum_sha256=sha256(b"other-image").hexdigest(),
         )
@@ -146,9 +144,9 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 class EvidenceReferenceTests(unittest.TestCase):
     def test_reference_is_media_agnostic(self) -> None:
-        reference = EvidenceReference(1, 1, 1, "bucket", "key", "video/mp4")
+        reference = EvidenceReference(1, 1, 1, "https://objects.example/key", "video/mp4")
         self.assertEqual(reference.mime_type, "video/mp4")
 
     def test_rejects_invalid_mime(self) -> None:
         with self.assertRaisesRegex(ValueError, "mime_type"):
-            EvidenceReference(1, 1, 1, "bucket", "key", "invalid")
+            EvidenceReference(1, 1, 1, "https://objects.example/key", "invalid")

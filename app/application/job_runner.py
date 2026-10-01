@@ -31,12 +31,12 @@ class EvidenceJobRunner:
             await self._report_failure(job_id, evidence, exc.code)
         except ValueError:
             await self._report_failure(job_id, evidence, "invalid_evidence")
-        except Exception:
-            logger.exception("Fallo inesperado en el trabajo %s", job_id)
+        except Exception as exc:
+            logger.error("Fallo inesperado en el trabajo %s (%s)", job_id, type(exc).__name__)
             await self._report_failure(job_id, evidence, "internal_error")
 
     async def _report_failure(self, job_id: str, evidence: EvidenceReference, code: str) -> None:
         try:
             await self.sink.publish_failure(job_id, evidence, code)
-        except Exception:
-            logger.exception("No se pudo entregar el fallo del trabajo %s", job_id)
+        except Exception as exc:
+            logger.error("No se pudo entregar el fallo del trabajo %s (%s)", job_id, type(exc).__name__)

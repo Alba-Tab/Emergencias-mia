@@ -14,8 +14,7 @@ class JobRequest(BaseModel):
     evidence_id: int = Field(gt=0, alias="evidenceId")
     alert_id: int = Field(gt=0, alias="alertId")
     incident_id: int = Field(gt=0, alias="incidentId")
-    bucket: str = Field(min_length=1)
-    object_key: str = Field(min_length=1, alias="objectKey")
+    download_url: str = Field(min_length=1, alias="downloadUrl")
     mime_type: str = Field(alias="mimeType")
     checksum_sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$", alias="checksumSha256")
 

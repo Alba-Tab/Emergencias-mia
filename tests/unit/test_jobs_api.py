@@ -14,13 +14,13 @@ from tests.fixtures import synthetic_png
 class JobsApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.config = Settings(
-            service_token="service-secret", s3_bucket="allowed", openrouter_api_key="provider-secret",
+            service_token="service-secret", openrouter_api_key="provider-secret",
             callback_url="http://localhost/callback", callback_token="callback-secret",
         )
         app.dependency_overrides[get_settings] = lambda: self.config
         self.payload = {
             "jobId": str(uuid4()), "evidenceId": 1, "alertId": 2, "incidentId": 3,
-            "bucket": "allowed", "objectKey": "test/image.png", "mimeType": "image/png",
+            "downloadUrl": "https://objects.example/test/image.png?signature=private", "mimeType": "image/png",
             "checksumSha256": sha256(synthetic_png()).hexdigest(),
         }
 
@@ -38,9 +38,10 @@ class JobsApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_validation(self):
         for field, value in (("jobId", "bad"), ("evidenceId", 0), ("mimeType", "video/mp4"),
-                             ("checksumSha256", "bad"), ("bucket", "other")):
+                             ("checksumSha256", "bad"), ("downloadUrl", "http://localhost/image.png")):
             payload = {**self.payload, field: value}
             self.assertEqual((await self.post(payload)).status_code, 422, field)
+        self.assertEqual((await self.post({**self.payload, "bucket": "old-contract"})).status_code, 422)
         self.config.callback_url = None
         self.assertEqual((await self.post()).status_code, 503)
         self.config.callback_url = "http://remote.example/callback"
@@ -50,7 +51,7 @@ class JobsApiTests(unittest.IsolatedAsyncioTestCase):
         seen = []
 
         class Reader:
-            def __init__(self, *_):
+            def __init__(self, *_, **__):
                 pass
 
             async def read(self, _):
@@ -74,7 +75,7 @@ class JobsApiTests(unittest.IsolatedAsyncioTestCase):
             async def publish_failure(self, *_):
                 self.fail("unexpected failure")
 
-        with patch("app.adapters.inbound.http.jobs.S3EvidenceReader", Reader), \
+        with patch("app.adapters.inbound.http.jobs.HttpEvidenceReader", Reader), \
              patch("app.adapters.inbound.http.jobs.OpenRouterSceneAnalyzer", Analyzer), \
              patch("app.adapters.inbound.http.jobs.HttpResultSink", Sink):
             response = await self.post()

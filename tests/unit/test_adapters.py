@@ -1,15 +1,13 @@
-import io
 import json
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 import httpx
-from botocore.exceptions import ClientError
 
 from app.adapters.outbound.backend.http_result_sink import HttpResultSink
 from app.adapters.outbound.providers.openrouter_scene_analyzer import OpenRouterSceneAnalyzer
-from app.adapters.outbound.storage.s3_evidence_reader import S3EvidenceReader
+from app.adapters.outbound.storage.http_evidence_reader import HttpEvidenceReader, valid_download_url
 from app.application.job_runner import EvidenceJobRunner, JobError
 from app.application.use_cases.analyze_evidence import UnsupportedModalityError
 from app.domain.analysis_result import AnalysisResult, SceneAnalysis
@@ -17,38 +15,68 @@ from app.domain.evidence_reference import EvidenceReference
 from tests.fixtures import synthetic_png
 
 
-class FakeS3:
-    def __init__(self, data=None, content_type="image/png", error=None):
-        self.data, self.content_type, self.error = data, content_type, error
-
-    def get_object(self, **kwargs):
-        if self.error:
-            raise self.error
-        return {"Body": io.BytesIO(self.data), "ContentLength": len(self.data), "ContentType": self.content_type}
-
-
-class S3Tests(unittest.IsolatedAsyncioTestCase):
+class DownloadTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.evidence = EvidenceReference(1, 2, 3, "allowed", "key", "image/png")
+        self.evidence = EvidenceReference(1, 2, 3, "https://objects.example/key?signature=private", "image/png")
 
-    async def test_reads_allowed_bucket(self):
-        self.assertEqual(await S3EvidenceReader("allowed", client=FakeS3(synthetic_png())).read(self.evidence), synthetic_png())
+    async def test_reads_private_url_without_modifying_signature(self):
+        seen = []
 
-    async def test_rejects_other_bucket(self):
-        with self.assertRaisesRegex(JobError, "bucket_not_allowed"):
-            await S3EvidenceReader("other", client=FakeS3(synthetic_png())).read(self.evidence)
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, content=synthetic_png(), headers={"Content-Type": "image/png"})
 
-    async def test_rejects_missing_empty_large_and_wrong_mime(self):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            image = await HttpEvidenceReader(client=client).read(self.evidence)
+        self.assertEqual(image, synthetic_png())
+        self.assertEqual(seen, [self.evidence.download_url])
+
+    async def test_rejects_unsafe_urls(self):
+        for url in ("http://objects.example/key", "https://localhost/key", "https://127.0.0.1/key",
+                    "https://user:pass@objects.example/key", "https://objects.example:8443/key",
+                    "https://objects.example/key#fragment"):
+            self.assertFalse(valid_download_url(url), url)
+            evidence = EvidenceReference(1, 2, 3, url, "image/png")
+            with self.assertRaisesRegex(JobError, "invalid_download_url"):
+                await HttpEvidenceReader().read(evidence)
+
+    async def test_rejects_missing_forbidden_empty_large_wrong_mime_and_redirect(self):
         cases = [
-            (FakeS3(error=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")), "object_not_found"),
-            (FakeS3(synthetic_png(), content_type="image/jpeg"), "mime_mismatch"),
-            (FakeS3(synthetic_png()), "image_too_large"),
+            (httpx.Response(404), "object_not_found", 1024),
+            (httpx.Response(403), "download_forbidden", 1024),
+            (httpx.Response(302, headers={"Location": "https://other.example"}), "download_failed", 1024),
+            (httpx.Response(200, content=synthetic_png(), headers={"Content-Type": "image/jpeg"}), "mime_mismatch", 1024),
+            (httpx.Response(200, content=synthetic_png(), headers={"Content-Type": "image/png"}), "image_too_large", 1),
         ]
-        for client, code in cases:
-            limit = 1 if code == "image_too_large" else 1024
-            with self.assertRaisesRegex(JobError, code):
-                await S3EvidenceReader("allowed", client=client, max_bytes=limit).read(self.evidence)
-        self.assertEqual(await S3EvidenceReader("allowed", client=FakeS3(b"")).read(self.evidence), b"")
+        for response, code, limit in cases:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: response)) as client:
+                with self.assertRaisesRegex(JobError, code):
+                    await HttpEvidenceReader(client=client, max_bytes=limit).read(self.evidence)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=b"", headers={"Content-Type": "image/png"}))) as client:
+            self.assertEqual(await HttpEvidenceReader(client=client).read(self.evidence), b"")
+
+    async def test_retries_transient_http_errors_and_timeout(self):
+        for status_code in (429, 500):
+            calls = []
+
+            def handler(_):
+                calls.append(1)
+                return httpx.Response(status_code)
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                with patch("app.adapters.outbound.storage.http_evidence_reader.asyncio.sleep"):
+                    with self.assertRaisesRegex(JobError, "download_unavailable"):
+                        await HttpEvidenceReader(client=client).read(self.evidence)
+            self.assertEqual(len(calls), 3)
+
+        def timeout(_):
+            raise httpx.ConnectTimeout("timeout")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
+            with patch("app.adapters.outbound.storage.http_evidence_reader.asyncio.sleep"):
+                with self.assertRaisesRegex(JobError, "download_unavailable"):
+                    await HttpEvidenceReader(client=client).read(self.evidence)
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -112,7 +140,7 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
             sink = HttpResultSink("http://local/callback", "callback-secret", client)
             scene = SceneAnalysis("resumen", (), (), (), "openrouter", "model", "image-v1")
             await sink.publish(AnalysisResult("job", 1, 2, 3, scene, datetime.now(timezone.utc)))
-            await sink.publish_failure("job", EvidenceReference(1, 2, 3, "bucket", "key", "image/png"), "object_not_found")
+            await sink.publish_failure("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"), "object_not_found")
         self.assertEqual([p["status"] for p in payloads], ["completed", "failed"])
         self.assertEqual(payloads[0]["result"]["promptVersion"], "image-v1")
         self.assertEqual(payloads[1]["errorCode"], "object_not_found")
@@ -122,7 +150,7 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
             sink = HttpResultSink("http://local/callback", "token", client)
             with patch("app.adapters.outbound.backend.http_result_sink.asyncio.sleep"):
                 with self.assertRaisesRegex(JobError, "callback_failed"):
-                    await sink.publish_failure("job", EvidenceReference(1, 2, 3, "bucket", "key", "image/png"), "invalid_image")
+                    await sink.publish_failure("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"), "invalid_image")
 
     async def test_callback_timeout(self):
         def timeout(_):
@@ -132,7 +160,7 @@ class CallbackTests(unittest.IsolatedAsyncioTestCase):
             sink = HttpResultSink("http://local/callback", "token", client)
             with patch("app.adapters.outbound.backend.http_result_sink.asyncio.sleep"):
                 with self.assertRaisesRegex(JobError, "callback_failed"):
-                    await sink.publish_failure("job", EvidenceReference(1, 2, 3, "bucket", "key", "image/png"), "invalid_image")
+                    await sink.publish_failure("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"), "invalid_image")
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -149,7 +177,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.code = code
 
         sink = Sink()
-        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "bucket", "key", "image/png"))
+        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"))
         self.assertEqual(sink.code, "object_not_found")
 
     async def test_reports_unimplemented_modality(self):
@@ -164,5 +192,21 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.code = code
 
         sink = Sink()
-        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "bucket", "key", "audio/wav"))
+        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "audio/wav"))
         self.assertEqual(sink.code, "unsupported_media_type")
+
+    async def test_does_not_log_download_url_on_unexpected_error(self):
+        secret_url = "https://objects.example/key?signature=secret"
+
+        class UseCase:
+            async def execute(self, *_):
+                raise RuntimeError(secret_url)
+
+        class Sink:
+            async def publish_failure(self, *_):
+                pass
+
+        with self.assertLogs("app.application.job_runner", level="ERROR") as logs:
+            await EvidenceJobRunner(UseCase(), Sink()).run(
+                "job", EvidenceReference(1, 2, 3, secret_url, "image/png"))
+        self.assertNotIn(secret_url, " ".join(logs.output))
