@@ -1,40 +1,50 @@
 # Emergencias AI
 
-Servicio Python para analizar evidencias de emergencias. El backend principal conserva las alertas, los incidentes, los archivos registrados, los análisis persistidos y el resumen oficial. Este servicio recibe una referencia autorizada, procesa la evidencia y devuelve un resultado individual.
+Microservicio de análisis preliminar de imágenes. El backend conserva la verdad de alertas, incidentes, evidencias, resultados y resúmenes; este servicio solo procesa una evidencia por trabajo. Audio, video y fusión por incidente quedan para etapas posteriores.
 
-## Estado actual
-
-La API expone `GET /health`. Ya existe un caso de uso independiente de infraestructura para analizar **una imagen**, con puertos de lectura, análisis y entrega del resultado. La referencia de evidencia es genérica; el pipeline de imagen limita los MIME a JPEG, PNG y WebP. Aún no hay endpoint de trabajos, adaptadores S3/OpenRouter/callback, fusión de resultados ni integración con el backend. Esta base arranca y sus reglas de aplicación se pueden probar, pero todavía no procesa imágenes reales de extremo a extremo.
-
-Imagen, audio y video forman parte del alcance del proyecto. Se implementarán por etapas, comenzando con imagen. No se necesita una cola de mensajes para esta base; se reevaluará si la carga o los reintentos lo requieren.
-
-## Arranque local
-
-Desde esta carpeta:
+## Configuración y arranque
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
-.venv/bin/python -m uvicorn app.main:app --reload
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Consultar `http://127.0.0.1:8000/health` debe devolver `{"status":"ok","service":"emergencias-ai"}`. La documentación de los endpoints actuales está en `http://127.0.0.1:8000/docs`.
+`GET /health` no requiere configuración y devuelve `{"status":"ok","service":"emergencias-ai"}`. Para `POST /v1/jobs`, configurar `AI_SERVICE_TOKEN`, `AI_S3_BUCKET`, `AI_OPENROUTER_API_KEY`, `AI_CALLBACK_URL` y `AI_CALLBACK_TOKEN` en `.env` ignorado o en variables de entorno. El SDK de AWS usa su cadena estándar de credenciales; `AI_AWS_REGION` es opcional. `.env.example` documenta los nombres sin secretos reales. El modelo inicial es `google/gemini-3.8-flash` y se cambia con `AI_OPENROUTER_MODEL`.
 
-Para ejecutar las pruebas de la base:
+## Contrato de trabajo
+
+El backend autorizado llama `POST /v1/jobs` con `Authorization: Bearer <AI_SERVICE_TOKEN>` y JSON:
+
+```json
+{
+  "jobId": "a38ab948-4c3f-43d5-b684-a1898c307a7e",
+  "evidenceId": 12,
+  "alertId": 7,
+  "incidentId": 3,
+  "bucket": "bucket-privado",
+  "objectKey": "evidencias/3/12.png",
+  "mimeType": "image/png",
+  "checksumSha256": "sha256-hexadecimal-de-64-caracteres"
+}
+```
+
+Los IDs deben ser positivos, `jobId` un UUID y `mimeType` JPEG, PNG o WebP. El bucket debe ser exactamente el configurado. El checksum real debe ser el SHA-256 hexadecimal de los bytes; el valor de ejemplo es ilustrativo. Responde `202 {"jobId":"...","status":"accepted"}` tras validar y programar el trabajo, o `401`, `422`/`503` según el problema. La URL de callback nunca viene de la petición.
+
+El trabajo lee como máximo 10 MiB de S3, comprueba Content-Type, firma de bytes y checksum, llama a OpenRouter con `data:` URL privada y `response_format: json_schema` más `provider.require_parameters=true`, y valida de nuevo el JSON recibido. El prompt pide observaciones, riesgos y limitaciones, sin diagnóstico. El resultado contiene proveedor, modelo, versión de prompt y fecha, sin confianza numérica inventada.
+
+El callback autenticado con `AI_CALLBACK_TOKEN` envía `jobId`, `evidenceId`, `alertId`, `incidentId`, `status: completed` y `result` (summary, observations, risks, limitations, provider, model, promptVersion, analyzedAt); o `status: failed` y `errorCode`. El receptor debe ser idempotente por `jobId`, porque un reintento puede repetir la entrega. No se registra la imagen ni los tokens.
+
+## Límites de esta versión
+
+Se usa `BackgroundTasks` del proceso FastAPI. `202` significa programado en memoria, **no persistido**: un reinicio o caída puede perder un trabajo aceptado. No hay procesamiento exactamente una vez, cola, Redis, Celery ni SQLite. Las llamadas OpenRouter y callback aplican timeout y hasta 3 intentos para fallos transitorios; un fallo definitivo del callback queda en el log para intervención, sin base local de reintentos. El backend deberá decidir su política de expiración/reenvío de trabajos.
+
+## Pruebas
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m pip check
+.venv/bin/python -m compileall -q app tests scripts
 ```
 
-`.env.example` muestra la configuración no sensible. Copiarlo a `.env` solo si hay que cambiar los valores por defecto; `.env` está excluido de Git. No colocar credenciales reales en el ejemplo ni en el código.
-
-## Organización y siguiente contrato
-
-- `app/domain`: referencias y resultados propios de IA; no replica las entidades Java.
-- `app/application`: caso de uso y puertos de capacidades; no importa FastAPI ni SDKs externos.
-- `app/adapters`: entrada HTTP y futuras conexiones con almacenamiento, proveedor y backend.
-- `app/core`: configuración transversal y composición de la aplicación.
-
-Antes de agregar `POST /jobs`, acordar con el backend: `jobId`, `evidenceId`, `alertId`, `incidentId`, referencia privada al archivo, MIME, checksum, contexto mínimo, autenticación entre servicios y formato del callback. La API de trabajos debe responder `202 Accepted` solo cuando el trabajo quedó aceptado. El backend controlará idempotencia y versiones del resumen; un resultado repetido no debe duplicar el análisis.
-
-Las decisiones del proyecto y la secuencia completa están en [`../docs/registros_reuniones_26_27_septiembre_2026.md`](../docs/registros_reuniones_26_27_septiembre_2026.md).
+`scripts/live_image_smoke.py` realiza la prueba optativa real con un PNG sintético: sube un único objeto a `ai-smoke-exclusive/<uuid>.png` del bucket configurado, llama a la API con un receptor de callback en localhost, verifica la respuesta y borra **solo ese objeto** en `finally`. Requiere clave OpenRouter y credenciales AWS válidas. Ejecutar desde esta carpeta: `.venv/bin/python -m scripts.live_image_smoke`. No publicar el repositorio ni fusionar la feature si esta prueba real falta o falla.

@@ -8,7 +8,7 @@ from hashlib import sha256
 from app.application.ports.evidence_reader import EvidenceReader
 from app.application.ports.result_sink import ResultSink
 from app.application.ports.scene_analyzer import SceneAnalyzer
-from app.application.pipelines.image_pipeline import validate_image_type
+from app.application.pipelines.image_pipeline import validate_image_bytes, validate_image_type
 from app.domain.analysis_result import AnalysisResult
 from app.domain.evidence_reference import EvidenceReference
 
@@ -38,6 +38,7 @@ class AnalyzeEvidence:
             raise ValueError("La imagen está vacía")
         if len(image) > self.max_image_bytes:
             raise ValueError("La imagen supera el tamaño permitido")
+        validate_image_bytes(image, evidence.mime_type)
         if evidence.checksum_sha256 and sha256(image).hexdigest() != evidence.checksum_sha256.lower():
             raise ValueError("El checksum de la imagen no coincide")
 
@@ -45,6 +46,7 @@ class AnalyzeEvidence:
         result = AnalysisResult(
             job_id=job_id,
             evidence_id=evidence.evidence_id,
+            alert_id=evidence.alert_id,
             incident_id=evidence.incident_id,
             scene=scene,
             analyzed_at=datetime.now(timezone.utc),

@@ -21,6 +21,7 @@ class SceneAnalysis:
 class AnalysisResult:
     job_id: str
     evidence_id: int
+    alert_id: int
     incident_id: int
     scene: SceneAnalysis
     analyzed_at: datetime

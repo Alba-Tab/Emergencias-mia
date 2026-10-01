@@ -52,7 +52,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
             object_key="evidencias/1/2/3",
             mime_type="image/jpeg",
         )
-        self.reader = Reader(b"image-bytes")
+        self.reader = Reader(b"\xff\xd8\xffimage-bytes")
         self.analyzer = Analyzer()
         self.sink = Sink()
         self.use_case = AnalyzeEvidence(self.reader, self.analyzer, self.sink)
@@ -117,6 +117,12 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.analyzer.calls, 0)
         self.assertEqual(self.sink.results, [])
+
+    async def test_rejects_mime_mismatch(self) -> None:
+        self.reader.content = b"not-a-jpeg"
+        with self.assertRaisesRegex(ValueError, "MIME"):
+            await self.use_case.execute("job-1", self.evidence)
+        self.assertEqual(self.analyzer.calls, 0)
 
 
 class EvidenceReferenceTests(unittest.TestCase):
