@@ -10,7 +10,8 @@ from botocore.exceptions import ClientError
 from app.adapters.outbound.backend.http_result_sink import HttpResultSink
 from app.adapters.outbound.providers.openrouter_scene_analyzer import OpenRouterSceneAnalyzer
 from app.adapters.outbound.storage.s3_evidence_reader import S3EvidenceReader
-from app.application.job_runner import ImageJobRunner, JobError
+from app.application.job_runner import EvidenceJobRunner, JobError
+from app.application.use_cases.analyze_evidence import UnsupportedModalityError
 from app.domain.analysis_result import AnalysisResult, SceneAnalysis
 from app.domain.evidence_reference import EvidenceReference
 from tests.fixtures import synthetic_png
@@ -148,5 +149,20 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.code = code
 
         sink = Sink()
-        await ImageJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "bucket", "key", "image/png"))
+        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "bucket", "key", "image/png"))
         self.assertEqual(sink.code, "object_not_found")
+
+    async def test_reports_unimplemented_modality(self):
+        class UseCase:
+            async def execute(self, *_):
+                raise UnsupportedModalityError("audio")
+
+        class Sink:
+            code = None
+
+            async def publish_failure(self, _job, _evidence, code):
+                self.code = code
+
+        sink = Sink()
+        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "bucket", "key", "audio/wav"))
+        self.assertEqual(sink.code, "unsupported_media_type")

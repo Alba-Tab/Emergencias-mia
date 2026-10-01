@@ -2,6 +2,8 @@
 
 Microservicio de análisis preliminar de imágenes. El backend conserva la verdad de alertas, incidentes, evidencias, resultados y resúmenes; este servicio solo procesa una evidencia por trabajo. Audio, video y fusión por incidente quedan para etapas posteriores.
 
+`AnalyzeEvidence` coordina la modalidad registrada y la entrega del resultado. Por ahora solo registra `AnalyzeImage`; audio y video requerirán sus propios casos de uso y contratos de resultado cuando se implementen, sin rutas vacías ni procesamiento simulado.
+
 ## Configuración y arranque
 
 ```sh

@@ -2,7 +2,7 @@
 
 import logging
 
-from app.application.use_cases.analyze_evidence import AnalyzeEvidence
+from app.application.use_cases.analyze_evidence import AnalyzeEvidence, UnsupportedModalityError
 from app.domain.evidence_reference import EvidenceReference
 
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ class JobError(Exception):
         self.code = code
 
 
-class ImageJobRunner:
+class EvidenceJobRunner:
     def __init__(self, use_case: AnalyzeEvidence, sink) -> None:
         self.use_case = use_case
         self.sink = sink
@@ -22,13 +22,15 @@ class ImageJobRunner:
     async def run(self, job_id: str, evidence: EvidenceReference) -> None:
         try:
             await self.use_case.execute(job_id, evidence)
+        except UnsupportedModalityError:
+            await self._report_failure(job_id, evidence, "unsupported_media_type")
         except JobError as exc:
             if exc.code == "callback_failed":
                 logger.error("No se pudo entregar callback del trabajo %s", job_id)
                 return
             await self._report_failure(job_id, evidence, exc.code)
         except ValueError:
-            await self._report_failure(job_id, evidence, "invalid_image")
+            await self._report_failure(job_id, evidence, "invalid_evidence")
         except Exception:
             logger.exception("Fallo inesperado en el trabajo %s", job_id)
             await self._report_failure(job_id, evidence, "internal_error")

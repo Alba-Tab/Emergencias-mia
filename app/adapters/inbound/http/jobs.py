@@ -8,8 +8,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from app.adapters.outbound.backend.http_result_sink import HttpResultSink
 from app.adapters.outbound.providers.openrouter_scene_analyzer import OpenRouterSceneAnalyzer
 from app.adapters.outbound.storage.s3_evidence_reader import S3EvidenceReader
-from app.application.job_runner import ImageJobRunner
+from app.application.job_runner import EvidenceJobRunner
 from app.application.use_cases.analyze_evidence import AnalyzeEvidence
+from app.application.use_cases.analyze_image import AnalyzeImage
 from app.core.config import Settings, settings
 from app.domain.evidence_reference import EvidenceReference
 from app.schemas.job import JobRequest
@@ -53,6 +54,7 @@ async def create_job(job: JobRequest, background_tasks: BackgroundTasks, config:
     reader = S3EvidenceReader(config.s3_bucket, config.aws_region)
     analyzer = OpenRouterSceneAnalyzer(config.openrouter_api_key, config.openrouter_model, timeout=config.openrouter_timeout_seconds)
     sink = HttpResultSink(config.callback_url, config.callback_token, timeout=config.callback_timeout_seconds)
-    runner = ImageJobRunner(AnalyzeEvidence(reader, analyzer, sink), sink)
+    image_analysis = AnalyzeImage(reader, analyzer)
+    runner = EvidenceJobRunner(AnalyzeEvidence({"image": image_analysis}, sink), sink)
     background_tasks.add_task(runner.run, str(job.job_id), evidence)
     return {"jobId": str(job.job_id), "status": "accepted"}

@@ -1,9 +1,10 @@
 import unittest
-from datetime import timezone
+from datetime import datetime, timezone
 from hashlib import sha256
 
 from app.application.use_cases.analyze_evidence import AnalyzeEvidence
-from app.domain.analysis_result import SceneAnalysis
+from app.application.use_cases.analyze_image import AnalyzeImage
+from app.domain.analysis_result import AnalysisResult, SceneAnalysis
 from app.domain.evidence_reference import EvidenceReference
 
 
@@ -55,7 +56,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.reader = Reader(b"\xff\xd8\xffimage-bytes")
         self.analyzer = Analyzer()
         self.sink = Sink()
-        self.use_case = AnalyzeEvidence(self.reader, self.analyzer, self.sink)
+        self.use_case = AnalyzeEvidence({"image": AnalyzeImage(self.reader, self.analyzer)}, self.sink)
 
     async def test_delivers_one_result_for_the_given_evidence(self) -> None:
         result = await self.use_case.execute("job-1", self.evidence)
@@ -81,7 +82,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_image_over_limit_before_provider_and_callback(self) -> None:
         self.reader.content = b"12345"
-        self.use_case = AnalyzeEvidence(self.reader, self.analyzer, self.sink, max_image_bytes=4)
+        self.use_case = AnalyzeEvidence({"image": AnalyzeImage(self.reader, self.analyzer, max_image_bytes=4)}, self.sink)
 
         with self.assertRaisesRegex(ValueError, "tamaño"):
             await self.use_case.execute("job-1", self.evidence)
@@ -95,11 +96,29 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.reader.calls, 0)
 
-    async def test_rejects_non_image_before_reading(self) -> None:
+    async def test_rejects_unimplemented_modality_before_reading(self) -> None:
         evidence = EvidenceReference(3, 2, 1, "private-evidence", "key", "video/mp4")
-        with self.assertRaisesRegex(ValueError, "Tipo de imagen"):
+        with self.assertRaisesRegex(ValueError, "Modalidad no implementada"):
             await self.use_case.execute("job-1", evidence)
         self.assertEqual(self.reader.calls, 0)
+
+    async def test_dispatches_registered_modalities_without_implementing_them(self) -> None:
+        calls = []
+
+        class FakeModalityAnalyzer:
+            async def execute(self, job_id, evidence):
+                calls.append(evidence.mime_type)
+                return AnalysisResult(job_id, evidence.evidence_id, evidence.alert_id,
+                                      evidence.incident_id, SceneAnalysis("prueba", (), (), (),
+                                      "doble", "doble", "test"),
+                                      datetime.now(timezone.utc))
+
+        self.use_case = AnalyzeEvidence({"audio": FakeModalityAnalyzer(), "video": FakeModalityAnalyzer()}, self.sink)
+        for mime_type in ("audio/wav", "video/mp4"):
+            evidence = EvidenceReference(3, 2, 1, "private-evidence", "key", mime_type)
+            await self.use_case.execute("job-1", evidence)
+        self.assertEqual(calls, ["audio/wav", "video/mp4"])
+        self.assertEqual(len(self.sink.results), 2)
 
     async def test_rejects_image_with_wrong_checksum(self) -> None:
         evidence = EvidenceReference(

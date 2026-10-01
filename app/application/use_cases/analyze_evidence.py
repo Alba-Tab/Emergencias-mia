@@ -1,55 +1,32 @@
-"""Coordina la lectura, análisis y entrega de una sola imagen."""
+"""Selecciona el análisis de la modalidad y entrega el resultado individual."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from hashlib import sha256
+from collections.abc import Mapping
 
-from app.application.ports.evidence_reader import EvidenceReader
+from app.application.ports.evidence_analyzer import EvidenceAnalyzer
 from app.application.ports.result_sink import ResultSink
-from app.application.ports.scene_analyzer import SceneAnalyzer
-from app.application.pipelines.image_pipeline import validate_image_bytes, validate_image_type
 from app.domain.analysis_result import AnalysisResult
 from app.domain.evidence_reference import EvidenceReference
 
 
+class UnsupportedModalityError(ValueError):
+    """No existe todavía un analizador registrado para esta modalidad."""
+
+
 class AnalyzeEvidence:
-    def __init__(
-        self,
-        reader: EvidenceReader,
-        analyzer: SceneAnalyzer,
-        sink: ResultSink,
-        max_image_bytes: int = 10 * 1024 * 1024,
-    ) -> None:
-        if max_image_bytes <= 0:
-            raise ValueError("max_image_bytes debe ser positivo")
-        self.reader = reader
-        self.analyzer = analyzer
+    def __init__(self, analyzers: Mapping[str, EvidenceAnalyzer], sink: ResultSink) -> None:
+        self.analyzers = dict(analyzers)
         self.sink = sink
-        self.max_image_bytes = max_image_bytes
 
     async def execute(self, job_id: str, evidence: EvidenceReference) -> AnalysisResult:
         if not job_id.strip():
             raise ValueError("job_id es obligatorio")
-        validate_image_type(evidence.mime_type)
+        modality = evidence.mime_type.partition("/")[0]
+        analyzer = self.analyzers.get(modality)
+        if analyzer is None:
+            raise UnsupportedModalityError(f"Modalidad no implementada: {modality}")
 
-        image = await self.reader.read(evidence)
-        if not image:
-            raise ValueError("La imagen está vacía")
-        if len(image) > self.max_image_bytes:
-            raise ValueError("La imagen supera el tamaño permitido")
-        validate_image_bytes(image, evidence.mime_type)
-        if evidence.checksum_sha256 and sha256(image).hexdigest() != evidence.checksum_sha256.lower():
-            raise ValueError("El checksum de la imagen no coincide")
-
-        scene = await self.analyzer.analyze(image, evidence.mime_type)
-        result = AnalysisResult(
-            job_id=job_id,
-            evidence_id=evidence.evidence_id,
-            alert_id=evidence.alert_id,
-            incident_id=evidence.incident_id,
-            scene=scene,
-            analyzed_at=datetime.now(timezone.utc),
-        )
+        result = await analyzer.execute(job_id, evidence)
         await self.sink.publish(result)
         return result
