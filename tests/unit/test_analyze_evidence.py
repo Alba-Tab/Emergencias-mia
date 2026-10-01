@@ -95,6 +95,12 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.reader.calls, 0)
 
+    async def test_rejects_non_image_before_reading(self) -> None:
+        evidence = EvidenceReference(3, 2, 1, "private-evidence", "key", "video/mp4")
+        with self.assertRaisesRegex(ValueError, "Tipo de imagen"):
+            await self.use_case.execute("job-1", evidence)
+        self.assertEqual(self.reader.calls, 0)
+
     async def test_rejects_image_with_wrong_checksum(self) -> None:
         evidence = EvidenceReference(
             evidence_id=3,
@@ -114,6 +120,10 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EvidenceReferenceTests(unittest.TestCase):
-    def test_rejects_unsupported_media_type(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Tipo de imagen"):
-            EvidenceReference(1, 1, 1, "bucket", "key", "video/mp4")
+    def test_reference_is_media_agnostic(self) -> None:
+        reference = EvidenceReference(1, 1, 1, "bucket", "key", "video/mp4")
+        self.assertEqual(reference.mime_type, "video/mp4")
+
+    def test_rejects_invalid_mime(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mime_type"):
+            EvidenceReference(1, 1, 1, "bucket", "key", "invalid")
