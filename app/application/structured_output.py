@@ -6,6 +6,7 @@ la respuesta se valida de nuevo localmente, porque el modo estricto no lo garant
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -16,6 +17,8 @@ from app.domain.analysis_result import (
 )
 from app.domain.errors import AiError
 from app.domain.incident_summary import SynthesisInput
+
+logger = logging.getLogger(__name__)
 
 
 class _Strict(BaseModel):
@@ -116,13 +119,33 @@ class SummaryOutput(_Strict):
     _summary = field_validator("summary")(_not_blank)
 
     def statements(self, source: SynthesisInput):
-        """Devuelve hallazgos, riesgos y contradicciones con sus fuentes verificadas."""
-        findings = tuple(source.sourced(f.text, f.basis, f.evidenceIds, f.alertIds)
-                         for f in self.findings if f.text.strip())[:MAX_ITEMS]
-        risks = tuple(source.sourced(r.text, "inferred", r.evidenceIds, r.alertIds)
-                      for r in self.risks if r.text.strip())[:MAX_ITEMS]
-        conflicts = tuple(source.sourced(c.text, "inferred", c.evidenceIds, c.alertIds)
-                          for c in self.conflicts if c.text.strip())[:MAX_ITEMS]
+        """Devuelve hallazgos, riesgos y contradicciones con sus fuentes verificadas.
+
+        Una cita a una fuente que no se recibió se descarta; la afirmación que se queda sin
+        ninguna fuente válida también. El resto del resumen se conserva.
+        """
+        dropped = {"citations": 0, "items": 0}
+
+        def keep(items, basis_of):
+            kept = []
+            for item in items:
+                if not item.text.strip():
+                    continue
+                statement, invalid = source.sourced(item.text, basis_of(item), item.evidenceIds, item.alertIds)
+                dropped["citations"] += invalid
+                if statement is None:
+                    dropped["items"] += 1
+                else:
+                    kept.append(statement)
+            return tuple(kept)[:MAX_ITEMS]
+
+        findings = keep(self.findings, lambda f: f.basis)
+        risks = keep(self.risks, lambda _: "inferred")
+        conflicts = keep(self.conflicts, lambda _: "inferred")
+        if dropped["citations"] or dropped["items"]:
+            # Solo cantidades: el texto puede traer datos del ciudadano.
+            logger.warning("resumen %s: citas inválidas descartadas=%d, afirmaciones sin fuente descartadas=%d",
+                           source.incident_id, dropped["citations"], dropped["items"])
         return findings, risks, conflicts
 
 

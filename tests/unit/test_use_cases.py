@@ -167,16 +167,58 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Hay alguien atrapado", text)
         self.assertIsNone(model.calls[0]["media"])
 
-    async def test_rejects_invented_or_missing_sources(self):
-        for finding in (
-            {"text": "x", "basis": "observed", "evidenceIds": [99], "alertIds": []},
-            {"text": "x", "basis": "observed", "evidenceIds": [], "alertIds": [1]},  # alerta sin texto
-            {"text": "x", "basis": "observed", "evidenceIds": [], "alertIds": []},
-        ):
-            model = FakeModel(summary_output(findings=[finding]))
-            with self.assertRaises(AiError) as caught:
-                await SynthesizeIncidentSummary(model, load_prompt("summary_v1")).execute(self.source())
-            self.assertEqual((caught.exception.code, caught.exception.retryable), ("invalid_model_output", True))
+    async def synthesize(self, **overrides):
+        model = FakeModel(summary_output(**overrides))
+        return await SynthesizeIncidentSummary(model, load_prompt("summary_v1"), lambda: NOW).execute(self.source())
+
+    async def test_all_valid_citations_are_kept_unchanged(self):
+        with self.assertNoLogs("app", level="WARNING"):
+            summary = await self.synthesize()
+        self.assertEqual((summary.findings[0].evidence_ids, summary.findings[0].alert_ids), ((10, 11), (2,)))
+        self.assertEqual((summary.risks[0].evidence_ids, summary.risks[0].alert_ids), ((10,), ()))
+        self.assertEqual((summary.conflicts[0].evidence_ids, summary.conflicts[0].alert_ids), ((10,), (2,)))
+        self.assertEqual([len(summary.findings), len(summary.risks), len(summary.conflicts)], [1, 1, 1])
+
+    async def test_drops_only_the_invalid_citations(self):
+        finding = {"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [10, 99], "alertIds": [1, 2, 77]}
+        with self.assertLogs("app", level="WARNING") as logs:
+            summary = await self.synthesize(findings=[finding])
+        kept = summary.findings[0]
+        self.assertEqual((kept.text, kept.evidence_ids, kept.alert_ids), ("Dos autos dañados.", (10,), (2,)))
+        # 99 y 77 no se recibieron; la alerta 1 no tiene texto.
+        self.assertIn("citas inválidas descartadas=3, afirmaciones sin fuente descartadas=0", logs.output[0])
+        self.assertNotIn("Dos autos", logs.output[0])
+        self.assertEqual(len(summary.risks), 1)
+        self.assertEqual(len(summary.conflicts), 1)
+
+    async def test_drops_an_item_left_without_valid_sources(self):
+        findings = [
+            {"text": "Inventado.", "basis": "observed", "evidenceIds": [99], "alertIds": []},
+            {"text": "Solo alerta sin texto.", "basis": "inferred", "evidenceIds": [], "alertIds": [1]},
+            {"text": "Sin fuentes.", "basis": "observed", "evidenceIds": [], "alertIds": []},
+            {"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [11], "alertIds": []},
+        ]
+        risks = [{"text": "Riesgo inventado.", "evidenceIds": [42], "alertIds": [42]}]
+        with self.assertLogs("app", level="WARNING") as logs:
+            summary = await self.synthesize(findings=findings, risks=risks)
+        self.assertEqual([f.text for f in summary.findings], ["Dos autos dañados."])
+        self.assertEqual(summary.risks, ())
+        self.assertEqual(len(summary.conflicts), 1)
+        self.assertEqual(summary.summary, "Choque de dos autos con una persona atrapada.")
+        self.assertIn("citas inválidas descartadas=4, afirmaciones sin fuente descartadas=4", logs.output[0])
+        # Las fuentes usadas siguen siendo las recibidas: la regla de versiones del backend no cambia.
+        self.assertEqual((summary.used_evidence_ids, summary.used_alert_ids), ((10, 11), (1, 2)))
+
+    async def test_corroboration_is_recomputed_from_the_valid_citations(self):
+        # Con la 99 válida serían más alertas; sin la alerta 1 (sin texto) solo cuentan 1 (por la 10) y 2.
+        finding = {"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [10, 99], "alertIds": [1, 2]}
+        conflict = {"text": "Versiones distintas.", "evidenceIds": [99], "alertIds": [2]}
+        with self.assertLogs("app", level="WARNING"):
+            summary = await self.synthesize(findings=[finding], conflicts=[conflict])
+        self.assertEqual(summary.findings[0].corroborating_alerts, 2)
+        self.assertEqual((summary.conflicts[0].evidence_ids, summary.conflicts[0].corroborating_alerts), ((), 1))
+
+    async def test_rejects_an_unusable_summary(self):
         model = FakeModel(summary_output(summary=" "))
         with self.assertRaises(AiError) as caught:
             await SynthesizeIncidentSummary(model, load_prompt("summary_v1")).execute(self.source())

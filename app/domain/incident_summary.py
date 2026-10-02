@@ -67,18 +67,23 @@ class SynthesisInput:
     def alert_of(self, evidence_id: int) -> int:
         return next(e.alert_id for e in self.evidences if e.evidence_id == evidence_id)
 
-    def sourced(self, text: str, basis: str, evidence_ids, alert_ids) -> SourcedStatement:
-        """Comprueba que el modelo cite solo fuentes recibidas y calcula la corroboración."""
-        evidence_ids = tuple(sorted(set(evidence_ids)))
-        alert_ids = tuple(sorted(set(alert_ids)))
-        known_evidences = {e.evidence_id for e in self.evidences}
-        textual_alerts = {a.alert_id for a in self.alerts if a.has_text}
-        if not evidence_ids and not alert_ids:
-            raise AiError("invalid_model_output", retryable=True)
-        if not set(evidence_ids) <= known_evidences or not set(alert_ids) <= textual_alerts:
-            raise AiError("invalid_model_output", retryable=True)
-        alerts = set(alert_ids) | {self.alert_of(evidence_id) for evidence_id in evidence_ids}
-        return SourcedStatement(clip(text), basis, evidence_ids, alert_ids, len(alerts))
+    def sourced(self, text: str, basis: str, evidence_ids, alert_ids) -> tuple[SourcedStatement | None, int]:
+        """Conserva solo las citas a fuentes recibidas y calcula la corroboración con ellas.
+
+        Devuelve la afirmación (o `None` si no le queda ninguna fuente válida) y cuántas citas se
+        descartaron. Una alerta sin texto no aporta nada que citar, así que también se descarta.
+        """
+        cited_evidences, cited_alerts = set(evidence_ids), set(alert_ids)
+        valid_evidences = cited_evidences & {e.evidence_id for e in self.evidences}
+        valid_alerts = cited_alerts & {a.alert_id for a in self.alerts if a.has_text}
+        dropped = len(cited_evidences - valid_evidences) + len(cited_alerts - valid_alerts)
+        if not valid_evidences and not valid_alerts:
+            return None, dropped
+        alerts = valid_alerts | {self.alert_of(evidence_id) for evidence_id in valid_evidences}
+        statement = SourcedStatement(
+            clip(text), basis, tuple(sorted(valid_evidences)), tuple(sorted(valid_alerts)), len(alerts),
+        )
+        return statement, dropped
 
 
 @dataclass(frozen=True, slots=True)
