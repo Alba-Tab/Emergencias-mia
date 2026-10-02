@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIB = 1024 * 1024
@@ -26,6 +27,13 @@ class Settings(BaseSettings):
     audio_max_seconds: float = 120.0
     video_max_bytes: int = 20 * MIB
     video_max_seconds: float = 60.0
+    # "frames": fotogramas (cambios de escena + relleno uniforme) y audio con ffmpeg; "full": el video entero.
+    video_mode: Literal["frames", "full"] = "frames"
+    video_max_frames: int = Field(default=8, ge=2, le=32)
+    video_scene_threshold: float = Field(default=0.3, gt=0, lt=1)
+    # Si no se pueden preparar los fotogramas: true envía el video completo; false responde unreadable_media.
+    video_fallback_to_full: bool = True
+    ffmpeg_timeout_seconds: float = Field(default=10.0, gt=0)
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", env_prefix="AI_", extra="ignore"
