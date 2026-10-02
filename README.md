@@ -23,6 +23,13 @@ python3 -m venv .venv
 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+En producción corre como contenedor (`Dockerfile`: usuario sin privilegios, puerto 8000, healthcheck sobre `/health`). Las versiones de las dependencias se fijan con `constraints.txt`:
+
+```sh
+docker build -t emergencias-mia .
+docker run --env-file .env -p 127.0.0.1:8000:8000 emergencias-mia
+```
+
 `GET /health` no requiere configuración. Para los endpoints `/v1` hacen falta `AI_SERVICE_TOKEN` y `AI_OPENROUTER_API_KEY` en `.env` (ignorado por git) o en variables de entorno; sin ellos responden `503 service_not_configured`. `.env.example` documenta los modelos por tarea y los límites. IA no configura buckets ni credenciales AWS: el backend entrega URLs temporales de lectura.
 
 ## Contrato
