@@ -1,7 +1,8 @@
 """Reglas de formato, tamaño y duración por modalidad, sin dependencias externas.
 
-La duración se mide en contenedores ISO BMFF (MP4, M4A, MOV) y WAV, que son los que graban
-las apps. Para el resto de formatos admitidos solo se acota el tamaño.
+Aquí la duración se lee de la cabecera en contenedores ISO BMFF (MP4, M4A, MOV) y WAV, que son
+los que graban las apps; es una primera barrera barata. La duración real de cualquier formato la
+mide después un `MediaPreparer` (ffprobe) y se comprueba con `check_duration`.
 """
 
 from __future__ import annotations
@@ -137,7 +138,11 @@ class MediaPolicy:
         seconds = duration_seconds(data, mime_type)
         if seconds is None and _has_duration(mime_type):
             raise AiError("unreadable_media")
-        if seconds is not None and seconds > self.max_seconds:
+        self.check_duration(seconds)
+
+    def check_duration(self, seconds: float | None) -> None:
+        """Duración medida fuera de este módulo; `None` significa que no se pudo medir."""
+        if self.max_seconds is not None and seconds is not None and seconds > self.max_seconds:
             raise AiError("duration_exceeded")
 
 
