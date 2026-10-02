@@ -23,8 +23,9 @@ class HttpEvidenceReader:
         for attempt in range(self.attempts):
             last = attempt == self.attempts - 1
             try:
-                return await self._read_once(evidence, max_bytes)
-            except _Transient as exc:
+                # El timeout de httpx es por operación: un envío lento pero constante nunca lo dispara.
+                return await asyncio.wait_for(self._read_once(evidence, max_bytes), self.timeout)
+            except (_Transient, asyncio.TimeoutError) as exc:
                 if last:
                     raise AiError("download_unavailable", retryable=True) from exc
             except (httpx.TimeoutException, httpx.TransportError) as exc:
