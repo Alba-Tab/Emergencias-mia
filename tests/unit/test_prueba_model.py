@@ -6,6 +6,7 @@ import httpx
 
 from app.adapters.inbound.http.dependencies import authorize
 from app.adapters.outbound.providers.prueba_model import LIMITATION, PruebaModel
+from app.application.ports.media_preparer import Frame, PreparedVideo
 from app.application.prompts import load_prompt
 from app.application.structured_output import AudioOutput, EvidenceOutput, VideoOutput, parse_output
 from app.application.use_cases.synthesize_summary import SynthesizeIncidentSummary
@@ -16,7 +17,7 @@ from app.domain.errors import AiError
 from app.domain.evidence_reference import EvidenceReference, Modality
 from app.domain.incident_summary import AlertContext, EvidenceInput, SynthesisInput
 from tests.fixtures import synthetic_bmff, synthetic_png
-from tests.unit.test_use_cases import FakeReader, analysis
+from tests.unit.test_use_cases import FakePreparer, FakeReader, analysis
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 
@@ -44,10 +45,12 @@ class CompositionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PruebaAnalysisTests(unittest.IsolatedAsyncioTestCase):
-    async def analyze(self, data, mime):
+    async def analyze(self, data, mime, preparer=None):
         async with httpx.AsyncClient() as client:
             services = build_services(settings(provider="prueba"), client)
         services.analyze.reader = FakeReader(data)
+        # Sin ffmpeg: la duración sale de la cabecera, como en un equipo que no lo tiene instalado.
+        services.analyze.preparer = preparer
         return await services.analyze.execute("job", reference(data, mime))
 
     async def test_outputs_per_modality(self):
@@ -65,6 +68,17 @@ class PruebaAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([t.start_second for t in video.analysis.timeline], [0, 10])
         self.assertEqual(video.provenance.provider, "prueba")
 
+    async def test_video_frames_use_only_the_received_seconds(self):
+        preparer = FakePreparer(PreparedVideo(4.0, (Frame(0.0, b"a"), Frame(2.5, b"b"), Frame(3.96, b"c")), b"m4a"))
+        video = await self.analyze(synthetic_bmff(4), "video/mp4", preparer)
+        self.assertEqual([t.start_second for t in video.analysis.timeline], [0.0, 2.5, 3.96])
+        self.assertEqual(video.provenance.prompt_version, "video-v2")
+        self.assertTrue(video.analysis.transcript)
+
+        silent = FakePreparer(PreparedVideo(4.0, (Frame(0.0, b"a"), Frame(3.9, b"b")), None))
+        video = await self.analyze(synthetic_bmff(4), "video/mp4", silent)
+        self.assertEqual(video.analysis.transcript, "")
+
     async def test_is_deterministic_and_schema_valid(self):
         model = PruebaModel()
         for name, output in (("image_evidence", EvidenceOutput), ("audio_evidence", AudioOutput),
@@ -79,6 +93,7 @@ class PruebaAnalysisTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient() as client:
             services = build_services(settings(provider="prueba"), client)
         services.analyze.reader = FakeReader(png)
+        services.analyze.preparer = None
         bad = EvidenceReference(1, 2, 3, "https://objects.example/k", "image/png", "0" * 64)
         with self.assertRaises(AiError) as caught:
             await services.analyze.execute("job", bad)
