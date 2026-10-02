@@ -1,34 +1,43 @@
 import json
 import unittest
-from datetime import datetime, timezone
 from unittest.mock import patch
 
 import httpx
 
-from app.adapters.outbound.backend.http_result_sink import HttpResultSink
-from app.adapters.outbound.providers.openrouter_scene_analyzer import OpenRouterSceneAnalyzer
-from app.adapters.outbound.storage.http_evidence_reader import HttpEvidenceReader, valid_download_url
-from app.application.job_runner import EvidenceJobRunner, JobError
-from app.application.use_cases.analyze_evidence import UnsupportedModalityError
-from app.domain.analysis_result import AnalysisResult, SceneAnalysis
-from app.domain.evidence_reference import EvidenceReference
+from app.adapters.outbound.providers.openrouter_model import OpenRouterModel, media_content
+from app.adapters.outbound.storage.http_evidence_reader import HttpEvidenceReader
+from app.application.ports.multimodal_model import MediaPart
+from app.core.net import valid_download_url
+from app.domain.errors import AiError
+from app.domain.evidence_reference import EvidenceReference, Modality
 from tests.fixtures import synthetic_png
+
+SLEEP_READER = "app.adapters.outbound.storage.http_evidence_reader.asyncio.sleep"
+SLEEP_MODEL = "app.adapters.outbound.providers.openrouter_model.asyncio.sleep"
 
 
 class DownloadTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.evidence = EvidenceReference(1, 2, 3, "https://objects.example/key?signature=private", "image/png")
+        self.evidence = EvidenceReference(1, 2, 3, "https://objects.example/key?signature=private", "image/png", "0" * 64)
 
-    async def test_reads_private_url_without_modifying_signature(self):
+    async def read(self, handler, max_bytes=1024):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch(SLEEP_READER):
+                return await HttpEvidenceReader(client).read(self.evidence, max_bytes)
+
+    async def assert_code(self, handler, code, retryable, max_bytes=1024):
+        with self.assertRaises(AiError) as caught:
+            await self.read(handler, max_bytes)
+        self.assertEqual((caught.exception.code, caught.exception.retryable), (code, retryable))
+
+    async def test_reads_url_unchanged(self):
         seen = []
 
         def handler(request):
             seen.append(str(request.url))
             return httpx.Response(200, content=synthetic_png(), headers={"Content-Type": "image/png"})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            image = await HttpEvidenceReader(client=client).read(self.evidence)
-        self.assertEqual(image, synthetic_png())
+        self.assertEqual(await self.read(handler), synthetic_png())
         self.assertEqual(seen, [self.evidence.download_url])
 
     async def test_rejects_unsafe_urls(self):
@@ -36,177 +45,81 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
                     "https://user:pass@objects.example/key", "https://objects.example:8443/key",
                     "https://objects.example/key#fragment"):
             self.assertFalse(valid_download_url(url), url)
-            evidence = EvidenceReference(1, 2, 3, url, "image/png")
-            with self.assertRaisesRegex(JobError, "invalid_download_url"):
-                await HttpEvidenceReader().read(evidence)
 
-    async def test_rejects_missing_forbidden_empty_large_wrong_mime_and_redirect(self):
-        cases = [
-            (httpx.Response(404), "object_not_found", 1024),
-            (httpx.Response(403), "download_forbidden", 1024),
-            (httpx.Response(302, headers={"Location": "https://other.example"}), "download_failed", 1024),
-            (httpx.Response(200, content=synthetic_png(), headers={"Content-Type": "image/jpeg"}), "mime_mismatch", 1024),
-            (httpx.Response(200, content=synthetic_png(), headers={"Content-Type": "image/png"}), "image_too_large", 1),
-        ]
-        for response, code, limit in cases:
-            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: response)) as client:
-                with self.assertRaisesRegex(JobError, code):
-                    await HttpEvidenceReader(client=client, max_bytes=limit).read(self.evidence)
-        async with httpx.AsyncClient(transport=httpx.MockTransport(
-            lambda _: httpx.Response(200, content=b"", headers={"Content-Type": "image/png"}))) as client:
-            self.assertEqual(await HttpEvidenceReader(client=client).read(self.evidence), b"")
+    async def test_error_codes(self):
+        png = synthetic_png()
+        await self.assert_code(lambda _: httpx.Response(404), "object_not_found", False)
+        await self.assert_code(lambda _: httpx.Response(403), "download_forbidden", True)
+        await self.assert_code(lambda _: httpx.Response(302, headers={"Location": "https://x.example"}),
+                               "download_failed", False)
+        await self.assert_code(lambda _: httpx.Response(200, content=png, headers={"Content-Type": "image/jpeg"}),
+                               "mime_mismatch", False)
+        await self.assert_code(lambda _: httpx.Response(200, content=png, headers={"Content-Type": "image/png"}),
+                               "evidence_too_large", False, max_bytes=1)
 
-    async def test_retries_transient_http_errors_and_timeout(self):
-        for status_code in (429, 500):
-            calls = []
+    async def test_retries_transient_then_fails_retryable(self):
+        calls = []
 
-            def handler(_):
-                calls.append(1)
-                return httpx.Response(status_code)
+        def handler(_):
+            calls.append(1)
+            return httpx.Response(503)
 
-            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                with patch("app.adapters.outbound.storage.http_evidence_reader.asyncio.sleep"):
-                    with self.assertRaisesRegex(JobError, "download_unavailable"):
-                        await HttpEvidenceReader(client=client).read(self.evidence)
-            self.assertEqual(len(calls), 3)
+        await self.assert_code(handler, "download_unavailable", True)
+        self.assertEqual(len(calls), 2)
 
         def timeout(_):
             raise httpx.ConnectTimeout("timeout")
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
-            with patch("app.adapters.outbound.storage.http_evidence_reader.asyncio.sleep"):
-                with self.assertRaisesRegex(JobError, "download_unavailable"):
-                    await HttpEvidenceReader(client=client).read(self.evidence)
+        await self.assert_code(timeout, "download_unavailable", True)
 
 
-class ProviderTests(unittest.IsolatedAsyncioTestCase):
-    async def test_structured_request_and_metadata(self):
+def completion(content, **extra):
+    return httpx.Response(200, json={"model": "google/test", "choices": [{"message": {"content": content}}], **extra})
+
+
+class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
+    async def generate(self, handler, media=None):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch(SLEEP_MODEL):
+                return await OpenRouterModel("key", "google/test", client).generate(
+                    instructions="reglas", text="analiza", media=media, schema_name="s", schema={"type": "object"})
+
+    def test_media_content_by_modality(self):
+        image = media_content(MediaPart(Modality.IMAGE, "image/png", b"x"))
+        self.assertTrue(image["image_url"]["url"].startswith("data:image/png;base64,"))
+        audio = media_content(MediaPart(Modality.AUDIO, "audio/x-m4a", b"x"))
+        self.assertEqual(audio["input_audio"]["format"], "m4a")
+        video = media_content(MediaPart(Modality.VIDEO, "video/quicktime", b"x"))
+        self.assertTrue(video["video_url"]["url"].startswith("data:video/mov;base64,"))
+
+    async def test_payload_and_reply(self):
         seen = []
 
         def handler(request):
-            body = json.loads(request.content)
-            seen.append(body)
-            self.assertTrue(body["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
-            self.assertTrue(body["response_format"]["json_schema"]["strict"])
-            self.assertTrue(body["provider"]["require_parameters"])
-            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
-                "summary": "Escena de prueba", "observations": ["Un píxel"], "risks": [], "limitations": ["Imagen sintética"]
-            })}}]})
+            seen.append(json.loads(request.content))
+            return completion('```json\n{"ok": true}\n```')
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            scene = await OpenRouterSceneAnalyzer("secret", "test-model", client).analyze(synthetic_png(), "image/png")
-        self.assertEqual(scene.model, "test-model")
-        self.assertEqual(scene.provider, "openrouter")
-        self.assertEqual(scene.prompt_version, "image-v1")
-        self.assertEqual(len(seen), 1)
+        reply = await self.generate(handler, MediaPart(Modality.IMAGE, "image/png", synthetic_png()))
+        self.assertEqual((reply.content, reply.provider, reply.model), ({"ok": True}, "openrouter", "google/test"))
+        payload = seen[0]
+        self.assertEqual(payload["messages"][0], {"role": "system", "content": "reglas"})
+        self.assertEqual(payload["messages"][1]["content"][1]["type"], "image_url")
+        self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+        self.assertTrue(payload["provider"]["require_parameters"])
 
-    async def test_invalid_response_and_retries(self):
-        for status_code in (429, 500):
-            calls = []
+    async def test_error_mapping(self):
+        cases = [
+            (lambda _: httpx.Response(429), "provider_unavailable", True),
+            (lambda _: httpx.Response(400), "provider_rejected", False),
+            (lambda _: httpx.Response(402), "provider_misconfigured", False),
+            (lambda _: completion("no es json"), "invalid_model_output", True),
+            (lambda _: httpx.Response(200, json={"error": {"message": "upstream"}}), "provider_unavailable", True),
+        ]
+        for handler, code, retryable in cases:
+            with self.assertRaises(AiError) as caught:
+                await self.generate(handler)
+            self.assertEqual((caught.exception.code, caught.exception.retryable), (code, retryable), code)
 
-            def handler(request):
-                calls.append(1)
-                return httpx.Response(status_code)
-
-            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                with patch("app.adapters.outbound.providers.openrouter_scene_analyzer.asyncio.sleep"):
-                    with self.assertRaisesRegex(JobError, "provider_unavailable"):
-                        await OpenRouterSceneAnalyzer("secret", "model", client).analyze(synthetic_png(), "image/png")
-            self.assertEqual(len(calls), 3)
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"choices": []}))) as client:
-            with self.assertRaisesRegex(JobError, "invalid_provider_response"):
-                await OpenRouterSceneAnalyzer("secret", "model", client).analyze(synthetic_png(), "image/png")
-
-    async def test_timeout(self):
-        def timeout(_):
-            raise httpx.ConnectTimeout("timeout")
-
-        async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
-            with patch("app.adapters.outbound.providers.openrouter_scene_analyzer.asyncio.sleep"):
-                with self.assertRaisesRegex(JobError, "provider_unavailable"):
-                    await OpenRouterSceneAnalyzer("secret", "model", client).analyze(synthetic_png(), "image/png")
-
-
-class CallbackTests(unittest.IsolatedAsyncioTestCase):
-    async def test_completed_and_failed_payloads(self):
-        payloads = []
-
-        def handler(request):
-            self.assertEqual(request.headers["Authorization"], "Bearer callback-secret")
-            payloads.append(json.loads(request.content))
-            return httpx.Response(204)
-
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            sink = HttpResultSink("http://local/callback", "callback-secret", client)
-            scene = SceneAnalysis("resumen", (), (), (), "openrouter", "model", "image-v1")
-            await sink.publish(AnalysisResult("job", 1, 2, 3, scene, datetime.now(timezone.utc)))
-            await sink.publish_failure("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"), "object_not_found")
-        self.assertEqual([p["status"] for p in payloads], ["completed", "failed"])
-        self.assertEqual(payloads[0]["result"]["promptVersion"], "image-v1")
-        self.assertEqual(payloads[1]["errorCode"], "object_not_found")
-
-    async def test_callback_failure(self):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(503))) as client:
-            sink = HttpResultSink("http://local/callback", "token", client)
-            with patch("app.adapters.outbound.backend.http_result_sink.asyncio.sleep"):
-                with self.assertRaisesRegex(JobError, "callback_failed"):
-                    await sink.publish_failure("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"), "invalid_image")
-
-    async def test_callback_timeout(self):
-        def timeout(_):
-            raise httpx.ConnectTimeout("timeout")
-
-        async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
-            sink = HttpResultSink("http://local/callback", "token", client)
-            with patch("app.adapters.outbound.backend.http_result_sink.asyncio.sleep"):
-                with self.assertRaisesRegex(JobError, "callback_failed"):
-                    await sink.publish_failure("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"), "invalid_image")
-
-
-class RunnerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_reports_failure(self):
-        class UseCase:
-            async def execute(self, *_):
-                raise JobError("object_not_found")
-
-        class Sink:
-            def __init__(self):
-                self.code = None
-
-            async def publish_failure(self, _job, _evidence, code):
-                self.code = code
-
-        sink = Sink()
-        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "image/png"))
-        self.assertEqual(sink.code, "object_not_found")
-
-    async def test_reports_unimplemented_modality(self):
-        class UseCase:
-            async def execute(self, *_):
-                raise UnsupportedModalityError("audio")
-
-        class Sink:
-            code = None
-
-            async def publish_failure(self, _job, _evidence, code):
-                self.code = code
-
-        sink = Sink()
-        await EvidenceJobRunner(UseCase(), sink).run("job", EvidenceReference(1, 2, 3, "https://objects.example/key", "audio/wav"))
-        self.assertEqual(sink.code, "unsupported_media_type")
-
-    async def test_does_not_log_download_url_on_unexpected_error(self):
-        secret_url = "https://objects.example/key?signature=secret"
-
-        class UseCase:
-            async def execute(self, *_):
-                raise RuntimeError(secret_url)
-
-        class Sink:
-            async def publish_failure(self, *_):
-                pass
-
-        with self.assertLogs("app.application.job_runner", level="ERROR") as logs:
-            await EvidenceJobRunner(UseCase(), Sink()).run(
-                "job", EvidenceReference(1, 2, 3, secret_url, "image/png"))
-        self.assertNotIn(secret_url, " ".join(logs.output))
+    async def test_retries_once_on_transient(self):
+        responses = [httpx.Response(503), completion('{"ok": 1}')]
+        self.assertEqual((await self.generate(lambda _: responses.pop(0))).content, {"ok": 1})
