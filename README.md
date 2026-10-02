@@ -8,7 +8,7 @@ El análisis es apoyo informativo para el personal. No es un diagnóstico, no es
 
 | Capa | Contenido |
 |---|---|
-| `domain/` | Resultado de evidencia, resumen de incidente, vocabularios cerrados (`eventType`, `hazards`, `severity`) y reglas: una gravedad sin justificación pasa a `undetermined`; un rango de personas incoherente pasa a desconocido; una afirmación del resumen debe citar fuentes recibidas. |
+| `domain/` | Resultado de evidencia, resumen de incidente, vocabularios cerrados (`eventType`, `hazards`, `severity`) y reglas: una gravedad sin justificación pasa a `undetermined`; un rango de personas incoherente pasa a desconocido; en el resumen se descartan las citas a fuentes no recibidas y las afirmaciones que se quedan sin ninguna fuente válida. |
 | `application/` | `AnalyzeEvidence` (una evidencia), `SynthesizeIncidentSummary` (todas las del incidente), límites por modalidad (`pipelines/media.py`), esquemas de salida estructurada y los puertos `EvidenceReader` y `MultimodalModel`. No importa FastAPI ni clientes de proveedores. |
 | `adapters/` | HTTP de entrada, descarga con URL temporal y `OpenRouterModel`, el único adaptador de proveedor para las tres modalidades y la síntesis. |
 | `prompts/` | Un archivo por prompt; el nombre del archivo es la versión que se registra en cada resultado (`image-v2`, `audio-v1`, `video-v1`, `summary-v1`). |
@@ -97,7 +97,9 @@ El backend envía **todas** las alertas del incidente y **todos** los análisis 
 }
 ```
 
-La respuesta `200` trae `summary` (`summary`, `eventType`, `people`, `hazards`, `findings`, `risks`, `severity`, `conflicts`, `limitations`), `usedEvidenceIds`, `usedAlertIds` y `provenance`. Cada hallazgo, riesgo o contradicción incluye `evidenceIds`, `alertIds` y `corroboratingAlerts`, que es la cantidad de alertas distintas que lo respaldan. Ese número lo calcula el código, no el modelo. Si el modelo cita una fuente que no recibió, la respuesta se rechaza con `invalid_model_output`.
+La respuesta `200` trae `summary` (`summary`, `eventType`, `people`, `hazards`, `findings`, `risks`, `severity`, `conflicts`, `limitations`), `usedEvidenceIds`, `usedAlertIds` y `provenance`. Cada hallazgo, riesgo o contradicción incluye `evidenceIds`, `alertIds` y `corroboratingAlerts`, que es la cantidad de alertas distintas que lo respaldan. Ese número lo calcula el código, no el modelo, y solo con las citas válidas. Si el modelo cita una fuente que no recibió (una evidencia desconocida o una alerta sin descripción ni cantidad), esa cita se descarta; si una afirmación se queda sin ninguna fuente válida, se descarta la afirmación. El resto del resumen se conserva y el servicio registra cuántas citas y afirmaciones descartó, sin su contenido. La respuesta se rechaza con `invalid_model_output` solo si no sirve como resumen (por ejemplo, `summary` vacío o un JSON que no cumple el esquema).
+
+`usedEvidenceIds` y `usedAlertIds` son las fuentes que recibió la síntesis, todas válidas porque el pedido se valida al entrar; no dependen de qué citó el modelo.
 
 - Con una sola evidencia y sin texto en las alertas, el resumen se arma sin llamar al modelo (`method: "single_evidence"`).
 - La síntesis no recibe el resumen anterior: depende solo de sus fuentes, así que el orden de llegada no la altera.
