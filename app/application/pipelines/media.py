@@ -82,6 +82,8 @@ def wav_duration_seconds(data: bytes) -> float | None:
     while offset + 8 <= len(data):
         kind, size = struct.unpack("<4sI", data[offset:offset + 8])
         if kind == b"fmt " and size >= 12:
+            if offset + 20 > len(data):
+                return None
             byte_rate = struct.unpack("<I", data[offset + 16:offset + 20])[0]
         elif kind == b"data":
             return size / byte_rate if byte_rate else None
@@ -89,10 +91,18 @@ def wav_duration_seconds(data: bytes) -> float | None:
     return None
 
 
+WAV_MIME_TYPES = frozenset({"audio/wav", "audio/x-wav"})
+
+
+def _has_duration(mime_type: str) -> bool:
+    """Contenedores que siempre declaran su duración: si no se puede leer, el archivo está dañado."""
+    return SIGNATURES.get(mime_type) is _is_bmff or mime_type in WAV_MIME_TYPES
+
+
 def duration_seconds(data: bytes, mime_type: str) -> float | None:
     if SIGNATURES.get(mime_type) is _is_bmff:
         return bmff_duration_seconds(data)
-    if mime_type in {"audio/wav", "audio/x-wav"}:
+    if mime_type in WAV_MIME_TYPES:
         return wav_duration_seconds(data)
     return None
 
@@ -125,7 +135,7 @@ class MediaPolicy:
         if self.max_seconds is None:
             return
         seconds = duration_seconds(data, mime_type)
-        if seconds is None and SIGNATURES[mime_type] is _is_bmff:
+        if seconds is None and _has_duration(mime_type):
             raise AiError("unreadable_media")
         if seconds is not None and seconds > self.max_seconds:
             raise AiError("duration_exceeded")
