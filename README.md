@@ -57,7 +57,7 @@ Todas las llamadas llevan `Authorization: Bearer <AI_SERVICE_TOKEN>` y son **sí
 | Modalidad | MIME admitidos | Límite por defecto |
 |---|---|---|
 | Imagen | `image/jpeg`, `image/png`, `image/webp` | 10 MiB |
-| Audio | `audio/mp4`, `audio/m4a`, `audio/x-m4a`, `audio/mpeg`, `audio/aac`, `audio/wav`, `audio/x-wav`, `audio/ogg` | 20 MiB y 300 s |
+| Audio | `audio/mp4`, `audio/m4a`, `audio/x-m4a`, `audio/mpeg`, `audio/aac`, `audio/wav`, `audio/x-wav`, `audio/ogg` | 5 MiB (igual que el backend) y 120 s |
 | Video | `video/mp4`, `video/quicktime`, `video/webm` | 20 MiB y 60 s |
 
 Antes de llamar al modelo se comprueban, en este orden: el MIME, que el archivo no esté vacío, el tamaño, la firma de bytes, el SHA-256 y la duración. La duración se lee del contenedor en MP4/M4A/MOV y WAV; en los demás formatos solo se limita el tamaño. Respuesta `200`:

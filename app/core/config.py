@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     download_timeout_seconds: float = 20.0
     max_concurrent_model_calls: int = 4
     image_max_bytes: int = 10 * MIB
-    audio_max_bytes: int = 20 * MIB
-    audio_max_seconds: float = 300.0
+    audio_max_bytes: int = 5 * MIB  # mismo límite que el backend
+    audio_max_seconds: float = 120.0
     video_max_bytes: int = 20 * MIB
     video_max_seconds: float = 60.0
 
