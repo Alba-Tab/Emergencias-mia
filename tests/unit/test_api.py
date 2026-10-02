@@ -1,3 +1,4 @@
+import logging
 import unittest
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -123,3 +124,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((response.status_code, response.json()["errorCode"]), (422, "unknown_alert"))
         response = await self.post("/v1/summaries", {"incidentId": 3, "alerts": []})
         self.assertEqual((response.status_code, response.json()["errorCode"]), (422, "invalid_request"))
+
+    def test_request_logs_are_emitted_without_httpx_urls(self):
+        self.assertTrue(logging.getLogger("app.adapters.inbound.http.analyses").isEnabledFor(logging.INFO))
+        self.assertFalse(logging.getLogger("httpx").isEnabledFor(logging.INFO))
