@@ -43,8 +43,10 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_unsafe_urls(self):
         for url in ("http://objects.example/key", "https://localhost/key", "https://127.0.0.1/key",
                     "https://user:pass@objects.example/key", "https://objects.example:8443/key",
-                    "https://objects.example/key#fragment"):
+                    "https://objects.example/key#fragment", "https://localhost./key", "https://2130706433/key",
+                    "https://0x7f.1/key", "https://127.1/key", "https://[::1]/key", "https://backend/key"):
             self.assertFalse(valid_download_url(url), url)
+        self.assertTrue(valid_download_url("https://bucket.s3.us-east-1.amazonaws.com/key?X-Amz-Signature=x"))
 
     async def test_error_codes(self):
         png = synthetic_png()
