@@ -1,8 +1,19 @@
 # Emergencias AI
 
-Microservicio de análisis preliminar de imágenes. El backend conserva la verdad de alertas, incidentes, evidencias, resultados y resúmenes; este servicio solo procesa una evidencia por trabajo. Audio, video y fusión por incidente quedan para etapas posteriores.
+Microservicio sin estado que analiza evidencias de emergencias (imagen, audio y video) y sintetiza el resumen preliminar de un incidente. El backend Spring conserva la verdad de alertas, incidentes, evidencias, trabajos, resultados y versiones del resumen. Este servicio no guarda nada: recibe una solicitud y devuelve el resultado en la misma respuesta.
 
-`AnalyzeEvidence` coordina la modalidad registrada y la entrega del resultado. Por ahora solo registra `AnalyzeImage`; audio y video requerirán sus propios casos de uso y contratos de resultado cuando se implementen, sin rutas vacías ni procesamiento simulado.
+El análisis es apoyo informativo para el personal. No es un diagnóstico, no es un triaje y no decide el despacho.
+
+## Diseño
+
+| Capa | Contenido |
+|---|---|
+| `domain/` | Resultado de evidencia, resumen de incidente, vocabularios cerrados (`eventType`, `hazards`, `severity`) y reglas: una gravedad sin justificación pasa a `undetermined`; un rango de personas incoherente pasa a desconocido; una afirmación del resumen debe citar fuentes recibidas. |
+| `application/` | `AnalyzeEvidence` (una evidencia), `SynthesizeIncidentSummary` (todas las del incidente), límites por modalidad (`pipelines/media.py`), esquemas de salida estructurada y los puertos `EvidenceReader` y `MultimodalModel`. No importa FastAPI ni clientes de proveedores. |
+| `adapters/` | HTTP de entrada, descarga con URL temporal y `OpenRouterModel`, el único adaptador de proveedor para las tres modalidades y la síntesis. |
+| `prompts/` | Un archivo por prompt; el nombre del archivo es la versión que se registra en cada resultado (`image-v2`, `audio-v1`, `video-v1`, `summary-v1`). |
+
+Imagen, audio y video comparten el caso de uso. Cada modalidad solo define sus límites, su prompt, su esquema y, opcionalmente, su modelo (`ModalityProfile`). Para cambiar de proveedor o usar un modelo local se escribe otro adaptador de `MultimodalModel`.
 
 ## Configuración y arranque
 
@@ -12,40 +23,100 @@ python3 -m venv .venv
 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-`GET /health` no requiere configuración y devuelve `{"status":"ok","service":"emergencias-ai"}`. Para `POST /v1/jobs`, configurar `AI_SERVICE_TOKEN`, `AI_OPENROUTER_API_KEY`, `AI_CALLBACK_URL` y `AI_CALLBACK_TOKEN` en `.env` ignorado o en variables de entorno. El backend es el único responsable de S3 y entrega una URL temporal de lectura; IA no configura buckets ni credenciales AWS. `.env.example` documenta los nombres sin secretos reales. El modelo inicial es `google/gemini-3.8-flash` y se cambia con `AI_OPENROUTER_MODEL`.
+`GET /health` no requiere configuración. Para los endpoints `/v1` hacen falta `AI_SERVICE_TOKEN` y `AI_OPENROUTER_API_KEY` en `.env` (ignorado por git) o en variables de entorno; sin ellos responden `503 service_not_configured`. `.env.example` documenta los modelos por tarea y los límites. IA no configura buckets ni credenciales AWS: el backend entrega URLs temporales de lectura.
 
-## Contrato de trabajo
+## Contrato
 
-El backend autorizado llama `POST /v1/jobs` con `Authorization: Bearer <AI_SERVICE_TOKEN>` y JSON:
+Todas las llamadas llevan `Authorization: Bearer <AI_SERVICE_TOKEN>` y son **síncronas**. El backend las hace desde un worker. Su tabla de trabajos es la cola duradera, así que no hay callback.
+
+### `POST /v1/analyses`: una evidencia
 
 ```json
 {
   "jobId": "a38ab948-4c3f-43d5-b684-a1898c307a7e",
-  "evidenceId": 12,
-  "alertId": 7,
-  "incidentId": 3,
+  "evidenceId": 12, "alertId": 7, "incidentId": 3,
   "downloadUrl": "https://almacenamiento.example/objeto?firma=temporal",
-  "mimeType": "image/png",
-  "checksumSha256": "sha256-hexadecimal-de-64-caracteres"
+  "mimeType": "image/jpeg",
+  "checksumSha256": "<sha-256 hexadecimal de los bytes>"
 }
 ```
 
-Los IDs deben ser positivos, `jobId` un UUID y `mimeType` JPEG, PNG o WebP. `downloadUrl` debe ser HTTPS, sin credenciales embebidas, IP literal, puerto alternativo ni redirecciones; es un secreto temporal y no debe aparecer en logs. El backend debe generarla para el objeto ya autorizado, con tiempo suficiente para comenzar la descarga y sus posibles reintentos. El checksum real debe ser el SHA-256 hexadecimal de los bytes; el valor de ejemplo es ilustrativo. Responde `202 {"jobId":"...","status":"accepted"}` tras validar y programar el trabajo, o `401`, `422`/`503` según el problema. La URL de callback viene de configuración, nunca de la petición.
+`downloadUrl` debe ser HTTPS, sin credenciales, IP literal, puerto alternativo ni redirecciones. Es un secreto temporal: no se registra en logs ni se repite en los errores de validación. Su vigencia debe cubrir el peor caso de la llamada (ver tiempos).
 
-El trabajo descarga como máximo 10 MiB desde la URL temporal, comprueba Content-Type, firma de bytes y checksum, llama a OpenRouter con `data:` URL privada y `response_format: json_schema` más `provider.require_parameters=true`, y valida de nuevo el JSON recibido. El prompt pide observaciones, riesgos y limitaciones, sin diagnóstico. El resultado contiene proveedor, modelo, versión de prompt y fecha, sin confianza numérica inventada. La red de despliegue debe restringir los destinos salientes permitidos; la validación de la URL en la aplicación no sustituye ese control.
+| Modalidad | MIME admitidos | Límite por defecto |
+|---|---|---|
+| Imagen | `image/jpeg`, `image/png`, `image/webp` | 10 MiB |
+| Audio | `audio/mp4`, `audio/m4a`, `audio/x-m4a`, `audio/mpeg`, `audio/aac`, `audio/wav`, `audio/x-wav`, `audio/ogg` | 20 MiB y 300 s |
+| Video | `video/mp4`, `video/quicktime`, `video/webm` | 20 MiB y 60 s |
 
-El callback autenticado con `AI_CALLBACK_TOKEN` envía `jobId`, `evidenceId`, `alertId`, `incidentId`, `status: completed` y `result` (summary, observations, risks, limitations, provider, model, promptVersion, analyzedAt); o `status: failed` y `errorCode`. El receptor debe ser idempotente por `jobId`, porque un reintento puede repetir la entrega. No se registra la imagen ni los tokens.
+Antes de llamar al modelo se comprueban, en este orden: el MIME, que el archivo no esté vacío, el tamaño, la firma de bytes, el SHA-256 y la duración. La duración se lee del contenedor en MP4/M4A/MOV y WAV; en los demás formatos solo se limita el tamaño. Respuesta `200`:
 
-## Límites de esta versión
+```json
+{
+  "jobId": "…", "evidenceId": 12, "alertId": 7, "incidentId": 3,
+  "modality": "image", "schemaVersion": "evidence-analysis.v1",
+  "analysis": {
+    "summary": "Choque entre dos autos en una intersección.",
+    "eventType": "traffic_accident",
+    "people": {"min": 1, "max": 2},
+    "hazards": ["traffic"],
+    "observations": [{"text": "Dos autos con daños frontales.", "basis": "observed"}],
+    "risks": ["Tráfico circulando cerca de los vehículos."],
+    "severity": {"level": "moderate", "basis": ["Daños frontales visibles en ambos autos."]},
+    "limitations": ["El interior de los vehículos no es visible."],
+    "transcript": null,
+    "timeline": []
+  },
+  "provenance": {"provider": "openrouter", "model": "…", "promptVersion": "image-v2", "generatedAt": "…", "method": "model"}
+}
+```
 
-Se usa `BackgroundTasks` del proceso FastAPI. `202` significa programado en memoria, **no persistido**: un reinicio o caída puede perder un trabajo aceptado. No hay procesamiento exactamente una vez, cola, Redis, Celery ni SQLite. Las llamadas OpenRouter y callback aplican timeout y hasta 3 intentos para fallos transitorios; un fallo definitivo del callback queda en el log para intervención, sin base local de reintentos. El backend deberá decidir su política de expiración/reenvío de trabajos.
+`transcript` aparece en audio y video (con nombres y teléfonos enmascarados), y `timeline` (`startSecond` y `text`) en video. `basis` distingue lo observado de lo inferido. No hay confianza numérica.
+
+### `POST /v1/summaries`: resumen del incidente
+
+El backend envía **todas** las alertas del incidente y **todos** los análisis vigentes, reenviando sin cambios el objeto `analysis` que guardó. Ningún archivo se vuelve a leer.
+
+```json
+{
+  "incidentId": 3,
+  "alerts": [
+    {"alertId": 7, "reportedAt": "…", "description": null, "affectedCount": null, "reporterIsPatient": false},
+    {"alertId": 8, "reportedAt": "…", "description": "Hay alguien atrapado", "affectedCount": 3}
+  ],
+  "evidences": [
+    {"evidenceId": 12, "alertId": 7, "modality": "image", "receivedAt": "…", "analysis": { "...": "..." }}
+  ]
+}
+```
+
+La respuesta `200` trae `summary` (`summary`, `eventType`, `people`, `hazards`, `findings`, `risks`, `severity`, `conflicts`, `limitations`), `usedEvidenceIds`, `usedAlertIds` y `provenance`. Cada hallazgo, riesgo o contradicción incluye `evidenceIds`, `alertIds` y `corroboratingAlerts`, que es la cantidad de alertas distintas que lo respaldan. Ese número lo calcula el código, no el modelo. Si el modelo cita una fuente que no recibió, la respuesta se rechaza con `invalid_model_output`.
+
+- Con una sola evidencia y sin texto en las alertas, el resumen se arma sin llamar al modelo (`method: "single_evidence"`).
+- La síntesis no recibe el resumen anterior: depende solo de sus fuentes, así que el orden de llegada no la altera.
+- **Regla para el backend:** guardar la propuesta como nueva versión solo si `usedEvidenceIds` incluye todas las evidencias de la versión vigente y agrega alguna. Una propuesta que llega tarde nunca reemplaza a una más completa.
+
+### Errores
+
+Todos tienen la forma `{"errorCode": "...", "retryable": true|false}`.
+
+| Estado | Códigos | Qué hace el backend |
+|---|---|---|
+| 401 | `unauthorized` | Revisar el token. |
+| 422 | `invalid_request`, `unsupported_media_type`, `evidence_empty`, `evidence_too_large`, `mime_mismatch`, `checksum_mismatch`, `duration_exceeded`, `unreadable_media`, `object_not_found`, `download_failed`, `invalid_download_url`, `unknown_alert`, `duplicate_source`, `nothing_to_summarize`, `too_many_sources` | Fallo definitivo de la evidencia o de la solicitud: no reintentar. |
+| 503 | `download_unavailable`, `download_forbidden` (URL vencida: firmar una nueva), `provider_unavailable`, `invalid_model_output` | Reintentar con espera creciente y un límite de intentos. |
+| 502 / 503 | `provider_rejected` / `provider_misconfigured`, `service_not_configured` | No reintentar automáticamente; requiere revisión. |
+| 500 | `internal_error` | Reintentar con límite. |
+
+### Tiempos
+
+Cada descarga y cada llamada al proveedor se intenta como máximo dos veces, con un timeout por intento (`AI_DOWNLOAD_TIMEOUT_SECONDS`=20, `AI_PROVIDER_TIMEOUT_SECONDS`=90). El peor caso es de unos 225 s. El timeout de lectura del cliente en el backend debe ser mayor (por ejemplo, 240 s), y la URL temporal debe durar al menos ese tiempo. `AI_MAX_CONCURRENT_MODEL_CALLS` limita las llamadas simultáneas al proveedor.
 
 ## Pruebas
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m pip check
 .venv/bin/python -m compileall -q app tests scripts
 ```
 
-`scripts/live_image_smoke.py` realiza la prueba optativa real con una URL HTTPS de descarga entregada por el backend, llama a la API con un receptor de callback en localhost y verifica el resultado. Requiere `AI_OPENROUTER_API_KEY`, `AI_SMOKE_DOWNLOAD_URL` y `AI_SMOKE_SHA256` en el `.env` ignorado o el entorno; `AI_SMOKE_MIME_TYPE` es opcional (`image/png` por defecto). El backend prepara y limpia el objeto de prueba; este servicio no crea ni elimina objetos S3. Ejecutar desde esta carpeta: `.venv/bin/python -m scripts.live_image_smoke`. No publicar el repositorio ni fusionar la feature si esta prueba real falta o falla.
+`scripts/live_smoke.py` es la prueba real opcional: analiza el objeto de `AI_SMOKE_DOWNLOAD_URL` (con `AI_SMOKE_SHA256` y `AI_SMOKE_MIME_TYPE`) y luego sintetiza un incidente de dos alertas con OpenRouter. El backend prepara y limpia el objeto. Se ejecuta con `.venv/bin/python -m scripts.live_smoke`.
