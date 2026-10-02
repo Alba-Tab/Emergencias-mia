@@ -1,3 +1,4 @@
+import logging
 import unittest
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -12,7 +13,7 @@ from app.domain.analysis_result import AnalysisResult, Provenance
 from app.domain.errors import AiError
 from app.domain.evidence_reference import Modality
 from app.main import app
-from app.schemas.summary import AnalysisIn
+from app.schemas.summary import AnalysisIn, SummaryRequest
 from tests.fixtures import analysis_payload, synthetic_png
 
 NOW = datetime(2026, 10, 2, tzinfo=timezone.utc)
@@ -123,3 +124,14 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((response.status_code, response.json()["errorCode"]), (422, "unknown_alert"))
         response = await self.post("/v1/summaries", {"incidentId": 3, "alerts": []})
         self.assertEqual((response.status_code, response.json()["errorCode"]), (422, "invalid_request"))
+
+    def test_request_logs_are_emitted_without_httpx_urls(self):
+        self.assertTrue(logging.getLogger("app.adapters.inbound.http.analyses").isEnabledFor(logging.INFO))
+        self.assertFalse(logging.getLogger("httpx").isEnabledFor(logging.INFO))
+
+    def test_summary_accepts_any_alert_the_backend_accepts(self):
+        request = SummaryRequest.model_validate({
+            "incidentId": 3,
+            "alerts": [{"alertId": 2, "description": "x" * 2000, "affectedCount": 50000}],
+        })
+        self.assertEqual(request.alerts[0].affectedCount, 50000)

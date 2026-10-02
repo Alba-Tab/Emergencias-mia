@@ -92,10 +92,11 @@ class OpenRouterModel:
             for attempt in range(self.attempts):
                 last = attempt == self.attempts - 1
                 try:
-                    response = await self.client.post(
+                    # Tope por intento: el timeout de httpx se reinicia con cada fragmento que llega.
+                    response = await asyncio.wait_for(self.client.post(
                         ENDPOINT, headers={"Authorization": f"Bearer {self.api_key}"}, json=payload, timeout=self.timeout,
-                    )
-                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    ), self.timeout)
+                except (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError) as exc:
                     if last:
                         raise AiError("provider_unavailable", retryable=True) from exc
                     await asyncio.sleep(0.5 * 2**attempt)

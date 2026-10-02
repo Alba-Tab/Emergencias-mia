@@ -23,6 +23,7 @@ class DurationTests(unittest.TestCase):
     def test_truncated_or_missing_moov(self):
         self.assertIsNone(bmff_duration_seconds(synthetic_bmff(5)[:20]))
         self.assertIsNone(bmff_duration_seconds(b"\x00\x00\x00\x08ftyp"))
+        self.assertIsNone(wav_duration_seconds(synthetic_wav(1)[:24]))
 
 
 class PolicyTests(unittest.TestCase):
@@ -57,6 +58,7 @@ class PolicyTests(unittest.TestCase):
         self.assert_code("duration_exceeded", self.audio, synthetic_bmff(61), "audio/mp4")
         self.assert_code("duration_exceeded", self.audio, synthetic_wav(61, byte_rate=100), "audio/wav")
         self.assert_code("unreadable_media", self.video, synthetic_bmff(5)[:40], "video/mp4")
+        self.assert_code("unreadable_media", self.audio, synthetic_wav(1)[:24], "audio/wav")
 
     def test_modality_of(self):
         self.assertIs(modality_of("image/webp"), Modality.IMAGE)
