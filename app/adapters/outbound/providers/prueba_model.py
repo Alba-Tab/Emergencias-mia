@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 
 from app.application.pipelines.media import duration_seconds
-from app.application.ports.multimodal_model import MediaPart, ModelReply
+from app.application.ports.multimodal_model import MediaPart, ModelReply, media_parts
 from app.domain.errors import AiError
+from app.domain.evidence_reference import Modality
 
 PROVIDER = "prueba"
 MODEL = "analizador-de-prueba"
@@ -32,8 +34,8 @@ def _evidence(**specific: Any) -> dict[str, Any]:
     }
 
 
-def _image(media: MediaPart | None) -> dict[str, Any]:
-    size = len(media.data) if media else 0
+def _image(parts: tuple[MediaPart, ...]) -> dict[str, Any]:
+    size = sum(len(part.data) for part in parts)
     return _evidence(
         summary="Imagen de prueba con una escena de emergencia simulada.",
         hazards=["smoke"],
@@ -46,7 +48,7 @@ def _image(media: MediaPart | None) -> dict[str, Any]:
     )
 
 
-def _audio(media: MediaPart | None) -> dict[str, Any]:
+def _audio(parts: tuple[MediaPart, ...]) -> dict[str, Any]:
     return _evidence(
         summary="Audio de prueba en el que quien habla pide ayuda.",
         hazards=["other"],
@@ -59,11 +61,19 @@ def _audio(media: MediaPart | None) -> dict[str, Any]:
     )
 
 
-def _video(media: MediaPart | None) -> dict[str, Any]:
-    seconds = duration_seconds(media.data, media.mime_type) if media else None
-    timeline = [{"startSecond": 0, "text": "Inicio del video de prueba."}]
-    if seconds:
-        timeline.append({"startSecond": round(seconds / 2, 2), "text": "Mitad del video de prueba."})
+def _video(parts: tuple[MediaPart, ...]) -> dict[str, Any]:
+    frames = [part for part in parts if part.second is not None]
+    if frames:  # video por fotogramas: la línea de tiempo usa solo los segundos recibidos
+        timeline = [{"startSecond": frame.second, "text": f"Fotograma de prueba {position}."}
+                    for position, frame in enumerate(frames, start=1)]
+        has_audio = any(part.modality is Modality.AUDIO for part in parts)
+        transcript = "Ayuda, hay humo, llamen a [nombre]." if has_audio else ""
+    else:
+        seconds = next((duration_seconds(p.data, p.mime_type) for p in parts if p.modality is Modality.VIDEO), None)
+        timeline = [{"startSecond": 0, "text": "Inicio del video de prueba."}]
+        if seconds:
+            timeline.append({"startSecond": round(seconds / 2, 2), "text": "Mitad del video de prueba."})
+        transcript = "Ayuda, hay humo, llamen a [nombre]."
     return _evidence(
         summary="Video de prueba con una escena de emergencia simulada.",
         hazards=["smoke"],
@@ -72,7 +82,7 @@ def _video(media: MediaPart | None) -> dict[str, Any]:
             {"text": "Se oye a una persona pidiendo ayuda.", "basis": "observed"},
         ],
         severityBasis=["Humo visible durante el video simulado."],
-        transcript="Ayuda, hay humo, llamen a [nombre].",
+        transcript=transcript,
         timeline=timeline,
     )
 
@@ -150,12 +160,18 @@ _BUILDERS = {"image_evidence": _image, "audio_evidence": _audio, "video_evidence
 
 class PruebaModel:
     async def generate(
-        self, *, instructions: str, text: str, media: MediaPart | None, schema_name: str, schema: dict[str, Any],
+        self,
+        *,
+        instructions: str,
+        text: str,
+        media: MediaPart | Sequence[MediaPart] | None,
+        schema_name: str,
+        schema: dict[str, Any],
     ) -> ModelReply:
         if schema_name == "incident_summary":
             content = _summary(text)
         elif schema_name in _BUILDERS:
-            content = _BUILDERS[schema_name](media)
+            content = _BUILDERS[schema_name](media_parts(media))
         else:
             raise AiError("provider_rejected")
         return ModelReply(content=content, provider=PROVIDER, model=MODEL)
