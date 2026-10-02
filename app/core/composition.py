@@ -8,8 +8,10 @@ from dataclasses import dataclass
 import httpx
 
 from app.adapters.outbound.providers.openrouter_model import OpenRouterModel
+from app.adapters.outbound.providers.prueba_model import PruebaModel
 from app.adapters.outbound.storage.http_evidence_reader import HttpEvidenceReader
 from app.application.pipelines.media import AUDIO_MIME_TYPES, IMAGE_MIME_TYPES, VIDEO_MIME_TYPES, MediaPolicy
+from app.application.ports.multimodal_model import MultimodalModel
 from app.application.prompts import load_prompt
 from app.application.structured_output import AudioOutput, EvidenceOutput, VideoOutput
 from app.application.use_cases.analyze_evidence import AnalyzeEvidence, ModalityProfile
@@ -25,12 +27,17 @@ class Services:
 
 
 def build_services(config: Settings, client: httpx.AsyncClient) -> Services | None:
-    """`None` si falta la clave del proveedor: el servicio arranca, pero responde 503."""
-    if not config.openrouter_api_key:
+    """`None` si falta la clave de OpenRouter: el servicio arranca, pero responde 503.
+
+    Con `provider="prueba"` no hace falta clave: todas las tareas usan el analizador de prueba.
+    """
+    if config.provider == "openrouter" and not config.openrouter_api_key:
         return None
     limiter = asyncio.Semaphore(config.max_concurrent_model_calls)
 
-    def model(name: str | None) -> OpenRouterModel:
+    def model(name: str | None) -> MultimodalModel:
+        if config.provider == "prueba":
+            return PruebaModel()
         return OpenRouterModel(config.openrouter_api_key, name or config.openrouter_model, client,
                                limiter=limiter, timeout=config.provider_timeout_seconds)
 
