@@ -75,10 +75,12 @@ class AnalysisIn(_In):
 
 
 class AlertIn(_In):
+    """Límites iguales a los que el backend acepta del ciudadano: una alerta válida allá no puede trabar el resumen."""
+
     alertId: int = Field(gt=0)
     reportedAt: datetime | None = None
-    description: str | None = Field(default=None, max_length=1000)
-    affectedCount: int | None = Field(default=None, ge=0, le=10000)
+    description: str | None = Field(default=None, max_length=2000)
+    affectedCount: int | None = Field(default=None, ge=0, le=2**31 - 1)
     reporterIsPatient: bool | None = None
 
 
