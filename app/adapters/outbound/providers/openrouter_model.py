@@ -6,11 +6,12 @@ import asyncio
 import base64
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
-from app.application.ports.multimodal_model import MediaPart, ModelReply
+from app.application.ports.multimodal_model import MediaPart, ModelReply, media_parts
 from app.domain.errors import AiError
 from app.domain.evidence_reference import Modality
 
@@ -37,6 +38,16 @@ def media_content(media: MediaPart) -> dict[str, Any]:
         return {"type": "input_audio", "input_audio": {"data": encoded, "format": audio_format}}
     mime_type = VIDEO_MIME_ALIASES.get(media.mime_type, media.mime_type)
     return {"type": "video_url", "video_url": {"url": f"data:{mime_type};base64,{encoded}"}}
+
+
+def user_content(text: str, media: MediaPart | Sequence[MediaPart] | None) -> list[dict[str, Any]]:
+    """Texto y medios en un solo mensaje; cada fotograma va precedido por su segundo."""
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for part in media_parts(media):
+        if part.second is not None:
+            content.append({"type": "text", "text": f"Fotograma del segundo {part.second:g}:"})
+        content.append(media_content(part))
+    return content
 
 
 def _json_content(body: dict[str, Any]) -> dict[str, Any]:
@@ -70,16 +81,19 @@ class OpenRouterModel:
         self.attempts = attempts
 
     async def generate(
-        self, *, instructions: str, text: str, media: MediaPart | None, schema_name: str, schema: dict[str, Any],
+        self,
+        *,
+        instructions: str,
+        text: str,
+        media: MediaPart | Sequence[MediaPart] | None,
+        schema_name: str,
+        schema: dict[str, Any],
     ) -> ModelReply:
-        user_content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-        if media is not None:
-            user_content.append(media_content(media))
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": instructions},
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": user_content(text, media)},
             ],
             "response_format": {
                 "type": "json_schema",
