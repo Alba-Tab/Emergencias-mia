@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIB = 1024 * 1024
@@ -7,6 +9,8 @@ class Settings(BaseSettings):
     app_name: str = "Emergencias AI API"
     version: str = "0.2.0"
     service_token: str | None = None
+    # "prueba" usa un analizador sin proveedor real: no necesita clave ni tiene costo.
+    provider: Literal["openrouter", "prueba"] = "openrouter"
     openrouter_api_key: str | None = None
     openrouter_model: str = "google/gemini-3.8-flash"
     # Opcionales: un modelo distinto por tarea; si faltan se usa openrouter_model.

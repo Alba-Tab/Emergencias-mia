@@ -10,7 +10,7 @@ El análisis es apoyo informativo para el personal. No es un diagnóstico, no es
 |---|---|
 | `domain/` | Resultado de evidencia, resumen de incidente, vocabularios cerrados (`eventType`, `hazards`, `severity`) y reglas: una gravedad sin justificación pasa a `undetermined`; un rango de personas incoherente pasa a desconocido; en el resumen se descartan las citas a fuentes no recibidas y las afirmaciones que se quedan sin ninguna fuente válida. |
 | `application/` | `AnalyzeEvidence` (una evidencia), `SynthesizeIncidentSummary` (todas las del incidente), límites por modalidad (`pipelines/media.py`), esquemas de salida estructurada y los puertos `EvidenceReader` y `MultimodalModel`. No importa FastAPI ni clientes de proveedores. |
-| `adapters/` | HTTP de entrada, descarga con URL temporal y `OpenRouterModel`, el único adaptador de proveedor para las tres modalidades y la síntesis. |
+| `adapters/` | HTTP de entrada, descarga con URL temporal, `OpenRouterModel` (el adaptador de proveedor para las tres modalidades y la síntesis) y `PruebaModel`, el analizador de prueba. |
 | `prompts/` | Un archivo por prompt; el nombre del archivo es la versión que se registra en cada resultado (`image-v2`, `audio-v1`, `video-v1`, `summary-v1`). |
 
 Imagen, audio y video comparten el caso de uso. Cada modalidad solo define sus límites, su prompt, su esquema y, opcionalmente, su modelo (`ModalityProfile`). Para cambiar de proveedor o usar un modelo local se escribe otro adaptador de `MultimodalModel`.
@@ -30,7 +30,11 @@ docker build -t emergencias-mia .
 docker run --env-file .env -p 127.0.0.1:8000:8000 emergencias-mia
 ```
 
-`GET /health` no requiere configuración. Para los endpoints `/v1` hacen falta `AI_SERVICE_TOKEN` y `AI_OPENROUTER_API_KEY` en `.env` (ignorado por git) o en variables de entorno; sin ellos responden `503 service_not_configured`. `.env.example` documenta los modelos por tarea y los límites. IA no configura buckets ni credenciales AWS: el backend entrega URLs temporales de lectura.
+`GET /health` no requiere configuración. Para los endpoints `/v1` hacen falta `AI_SERVICE_TOKEN` y `AI_OPENROUTER_API_KEY` en `.env` (ignorado por git) o en variables de entorno; sin ellos responden `503 service_not_configured`.
+
+### Analizador de prueba
+
+Con `AI_PROVIDER=prueba` el servicio no llama a ningún proveedor: `PruebaModel` devuelve salidas fijas que cumplen el esquema de cada modalidad (observaciones y peligros en imagen, transcripción enmascarada en audio, línea de tiempo en video) y un resumen que cita solo las fuentes recibidas. No hace falta `AI_OPENROUTER_API_KEY`, pero `AI_SERVICE_TOKEN` sigue siendo obligatorio. La validación del archivo (MIME, tamaño, firma, SHA-256 y duración) se hace igual que con el proveedor real. Los resultados llevan `provenance.provider = "prueba"` y una limitación que aclara que no vienen de un modelo, para que nadie los confunda con un análisis real. Sirve para probar el backend y las apps sin clave ni costo; no se usa en producción. `.env.example` documenta los modelos por tarea y los límites. IA no configura buckets ni credenciales AWS: el backend entrega URLs temporales de lectura.
 
 ## Contrato
 
