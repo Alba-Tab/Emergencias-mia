@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.domain.analysis_result import (
     MAX_ITEMS, MAX_TRANSCRIPT, Basis, EventType, EvidenceAnalysis, Finding, Hazard, PeopleRange,
@@ -20,6 +20,13 @@ from app.domain.incident_summary import SynthesisInput
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+def _not_blank(value: str) -> str:
+    """Un `summary` de solo espacios es una salida inválida del modelo, no un error interno."""
+    if not value.strip():
+        raise ValueError("summary vacío")
+    return value
 
 
 class FindingOut(_Strict):
@@ -38,6 +45,8 @@ class EvidenceOutput(_Strict):
     severity: SeverityLevel
     severityBasis: list[str]
     limitations: list[str]
+
+    _summary = field_validator("summary")(_not_blank)
 
     def _common(self, transcript: str | None = None, timeline=()) -> EvidenceAnalysis:
         return EvidenceAnalysis(
@@ -103,6 +112,8 @@ class SummaryOutput(_Strict):
     severityBasis: list[str]
     conflicts: list[SourcedOut]
     limitations: list[str]
+
+    _summary = field_validator("summary")(_not_blank)
 
     def statements(self, source: SynthesisInput):
         """Devuelve hallazgos, riesgos y contradicciones con sus fuentes verificadas."""
