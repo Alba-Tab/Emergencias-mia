@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from unittest.mock import patch
@@ -74,6 +75,15 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
 
         await self.assert_code(timeout, "download_unavailable", True)
 
+    async def test_attempt_has_total_deadline(self):
+        async def stalled(_):
+            await asyncio.Event().wait()
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(stalled)) as client:
+            with patch(SLEEP_READER), self.assertRaises(AiError) as caught:
+                await HttpEvidenceReader(client, timeout=0.05).read(self.evidence, 1024)
+        self.assertEqual((caught.exception.code, caught.exception.retryable), ("download_unavailable", True))
+
 
 def completion(content, **extra):
     return httpx.Response(200, json={"model": "google/test", "choices": [{"message": {"content": content}}], **extra})
@@ -125,3 +135,13 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_retries_once_on_transient(self):
         responses = [httpx.Response(503), completion('{"ok": 1}')]
         self.assertEqual((await self.generate(lambda _: responses.pop(0))).content, {"ok": 1})
+
+    async def test_attempt_has_total_deadline(self):
+        async def stalled(_):
+            await asyncio.Event().wait()
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(stalled)) as client:
+            with patch(SLEEP_MODEL), self.assertRaises(AiError) as caught:
+                await OpenRouterModel("key", "google/test", client, timeout=0.05).generate(
+                    instructions="reglas", text="analiza", media=None, schema_name="s", schema={"type": "object"})
+        self.assertEqual((caught.exception.code, caught.exception.retryable), ("provider_unavailable", True))
