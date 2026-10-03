@@ -67,19 +67,20 @@ def _video(parts: tuple[MediaPart, ...]) -> dict[str, Any]:
         timeline = [{"startSecond": frame.second, "text": f"Fotograma de prueba {position}."}
                     for position, frame in enumerate(frames, start=1)]
         has_audio = any(part.modality is Modality.AUDIO for part in parts)
-        transcript = "Ayuda, hay humo, llamen a [nombre]." if has_audio else ""
+        transcript = "Ayuda, hay humo, llamen a [nombre]." if has_audio else None
     else:
         seconds = next((duration_seconds(p.data, p.mime_type) for p in parts if p.modality is Modality.VIDEO), None)
         timeline = [{"startSecond": 0, "text": "Inicio del video de prueba."}]
         if seconds:
             timeline.append({"startSecond": round(seconds / 2, 2), "text": "Mitad del video de prueba."})
         transcript = "Ayuda, hay humo, llamen a [nombre]."
+    heard = [{"text": "Se oye a una persona pidiendo ayuda.", "basis": "observed"}] if transcript else []
     return _evidence(
         summary="Video de prueba con una escena de emergencia simulada.",
         hazards=["smoke"],
         observations=[
             {"text": "Se observa humo durante el video simulado.", "basis": "observed"},
-            {"text": "Se oye a una persona pidiendo ayuda.", "basis": "observed"},
+            *heard,
         ],
         severityBasis=["Humo visible durante el video simulado."],
         transcript=transcript,

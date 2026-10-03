@@ -77,7 +77,7 @@ class PruebaAnalysisTests(unittest.IsolatedAsyncioTestCase):
 
         silent = FakePreparer(PreparedVideo(4.0, (Frame(0.0, b"a"), Frame(3.9, b"b")), None))
         video = await self.analyze(synthetic_bmff(4), "video/mp4", silent)
-        self.assertEqual(video.analysis.transcript, "")
+        self.assertIsNone(video.analysis.transcript)
 
     async def test_is_deterministic_and_schema_valid(self):
         model = PruebaModel()
