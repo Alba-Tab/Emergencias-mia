@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.adapters.outbound.media.ffmpeg_preparer import FfmpegPreparer
+from app.application.pipelines.media import SilencePolicy
 from app.domain.errors import AiError
 
 HAS_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
@@ -44,6 +45,16 @@ class FfmpegPreparerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                          "-shortest")
         cls.silent = ffmpeg(cls.dir, "mudo.mp4", "-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=10",
                             "-c:v", "libx264", "-pix_fmt", "yuv420p")
+        # Audios M4A: silencio digital, un tono de 1 s entre silencios, ruido muy débil y un clic aislado.
+        cls.silent_m4a = ffmpeg(cls.dir, "silencio.m4a", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+                                "-t", "3", "-c:a", "aac")
+        cls.tone_m4a = ffmpeg(cls.dir, "tono.m4a", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                              "-af", "adelay=1000,apad=whole_dur=3", "-c:a", "aac")
+        cls.faint_m4a = ffmpeg(cls.dir, "debil.m4a", "-f", "lavfi", "-i", "anoisesrc=d=3:a=0.0005:c=white",
+                               "-c:a", "aac")
+        cls.click_m4a = ffmpeg(cls.dir, "clic.m4a", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+                               "-f", "lavfi", "-i", "sine=frequency=1000:duration=0.05",
+                               "-filter_complex", "[0][1]amix=inputs=2:duration=first", "-t", "3", "-c:a", "aac")
         # WebM escrito a un pipe: sin duración en la cabecera, como el de un navegador.
         cls.webm = subprocess.run(
             ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=3:size=160x120:rate=10",
@@ -91,6 +102,27 @@ class FfmpegPreparerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(prepared.frames), 8)
         self.assertEqual(jpeg_size(self.dir, prepared.frames[0].data), (320, 240))  # no se agranda
 
+    async def test_silence_is_told_apart_from_sound(self):
+        policy = SilencePolicy()
+        silent = await self.preparer.measure_sound(self.silent_m4a, "audio/mp4", policy.max_volume_db)
+        self.assertLess(silent.max_volume_db, -85)
+        self.assertEqual(silent.audible_seconds, 0.0)
+        self.assertTrue(policy.is_silent(silent))
+
+        tone = await self.preparer.measure_sound(self.tone_m4a, "audio/mp4", policy.max_volume_db)
+        self.assertGreater(tone.max_volume_db, -30)
+        self.assertAlmostEqual(tone.audible_seconds, 1.0, delta=0.1)
+        self.assertFalse(policy.is_silent(tone))
+
+        for name, data in (("ruido débil", self.faint_m4a), ("clic aislado", self.click_m4a)):
+            level = await self.preparer.measure_sound(data, "audio/mp4", policy.max_volume_db)
+            self.assertTrue(policy.is_silent(level), name)
+
+    async def test_sound_of_a_video_track(self):
+        level = await self.preparer.measure_sound(self.mp4, "video/mp4", -50)
+        self.assertAlmostEqual(level.audible_seconds, 4.0, delta=0.2)
+        self.assertFalse(SilencePolicy().is_silent(level))
+
     async def test_duration_without_header_is_measured_from_packets(self):
         info = await self.preparer.probe(self.webm, "video/webm")
         self.assertAlmostEqual(info.duration, 3.0, delta=0.15)
@@ -106,6 +138,7 @@ class FfmpegPreparerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as scratch, patch.object(tempfile, "tempdir", scratch):
             info = await self.preparer.probe(self.mp4, "video/mp4")
             await self.preparer.prepare_video(self.mp4, "video/mp4", info, 4, 0.3)
+            await self.preparer.measure_sound(self.mp4, "video/mp4", -50)
             with self.assertRaises(AiError):
                 await self.preparer.probe(b"\x1a\x45\xdf\xa3" + bytes(64), "video/webm")
             self.assertEqual(list(Path(scratch).iterdir()), [])

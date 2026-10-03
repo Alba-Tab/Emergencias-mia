@@ -26,6 +26,19 @@ class MediaInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class SoundLevel:
+    """Volumen de la pista de audio en dBFS (0 es el máximo; el silencio digital mide unos -91).
+
+    `audible_seconds` suma los tramos que superan el umbral de ruido pedido; los silencios más
+    cortos que la pausa mínima del adaptador cuentan como sonido, igual que las pausas del habla.
+    """
+
+    max_volume_db: float  # `-inf` si la pista no tiene ninguna muestra
+    mean_volume_db: float | None
+    audible_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class Frame:
     second: float
     data: bytes  # JPEG
@@ -41,6 +54,8 @@ class PreparedVideo:
 
 class MediaPreparer(Protocol):
     async def probe(self, data: bytes, mime_type: str) -> MediaInfo: ...
+
+    async def measure_sound(self, data: bytes, mime_type: str, noise_db: float) -> SoundLevel: ...
 
     async def prepare_video(
         self, data: bytes, mime_type: str, info: MediaInfo, max_frames: int, scene_threshold: float,

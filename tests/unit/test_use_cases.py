@@ -1,10 +1,13 @@
 import json
+import math
 import unittest
 from datetime import datetime, timezone
 from hashlib import sha256
 
-from app.application.pipelines.media import AUDIO_MIME_TYPES, IMAGE_MIME_TYPES, VIDEO_MIME_TYPES, MediaPolicy
-from app.application.ports.media_preparer import Frame, MediaInfo, MediaPreparationError, PreparedVideo
+from app.application.pipelines.media import (
+    AUDIO_MIME_TYPES, IMAGE_MIME_TYPES, VIDEO_MIME_TYPES, MediaPolicy, SilencePolicy,
+)
+from app.application.ports.media_preparer import Frame, MediaInfo, MediaPreparationError, PreparedVideo, SoundLevel
 from app.application.ports.multimodal_model import ModelReply
 from app.application.prompts import load_prompt
 from app.application.structured_output import AudioOutput, EvidenceOutput, VideoOutput, json_schema
@@ -14,7 +17,8 @@ from app.domain.analysis_result import EvidenceAnalysis, Finding, PeopleRange, S
 from app.domain.errors import AiError
 from app.domain.evidence_reference import EvidenceReference, Modality
 from app.domain.incident_summary import AlertContext, EvidenceInput, SynthesisInput
-from tests.fixtures import evidence_output, synthetic_bmff, synthetic_png
+from app.schemas.analysis import analysis_response
+from tests.fixtures import analysis_payload, evidence_output, synthetic_bmff, synthetic_png
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 
@@ -42,14 +46,20 @@ class FakeReader:
         return self.data
 
 
+LOUD = SoundLevel(-12.0, -30.0, 8.0)
+SILENT = SoundLevel(-91.0, -91.0, 0.0)
+
+
 class FakePreparer:
     """Preparador sin ffmpeg: devuelve lo que se le indica y registra las llamadas."""
 
-    def __init__(self, prepared=None, info=None, probe_error=None, prepare_error=None):
+    def __init__(self, prepared=None, info=None, probe_error=None, prepare_error=None, sound=LOUD, sound_error=None):
         self.prepared = prepared
         self.info = info
         self.probe_error = probe_error
         self.prepare_error = prepare_error
+        self.sound = sound
+        self.sound_error = sound_error
         self.calls = []
 
     async def probe(self, data, mime_type):
@@ -60,8 +70,14 @@ class FakePreparer:
             return self.info
         return MediaInfo(self.prepared.duration if self.prepared else 10.0, True, True)
 
+    async def measure_sound(self, data, mime_type, noise_db):
+        self.calls.append(("sound", noise_db))
+        if self.sound_error:
+            raise self.sound_error
+        return self.sound
+
     async def prepare_video(self, data, mime_type, info, max_frames, scene_threshold):
-        self.calls.append(("prepare", max_frames, scene_threshold))
+        self.calls.append(("prepare", max_frames, scene_threshold, info.has_audio))
         if self.prepare_error:
             raise self.prepare_error
         return self.prepared
@@ -76,9 +92,9 @@ def build(data, model, preparer=None, frames=None):
         Modality.IMAGE: ModalityProfile(MediaPolicy(Modality.IMAGE, IMAGE_MIME_TYPES, 1024),
                                         load_prompt("image_v2"), EvidenceOutput, model),
         Modality.AUDIO: ModalityProfile(MediaPolicy(Modality.AUDIO, AUDIO_MIME_TYPES, 4096, 120),
-                                        load_prompt("audio_v1"), AudioOutput, model),
+                                        load_prompt("audio_v2"), AudioOutput, model),
         Modality.VIDEO: ModalityProfile(MediaPolicy(Modality.VIDEO, VIDEO_MIME_TYPES, 4096, 60),
-                                        load_prompt("video_v1"), VideoOutput, model, frames),
+                                        load_prompt("video_v4"), VideoOutput, model, frames),
     }
     return AnalyzeEvidence(FakeReader(data), profiles, clock=lambda: NOW, preparer=preparer)
 
@@ -137,7 +153,7 @@ class AnalyzeEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((caught.exception.code, caught.exception.retryable), ("invalid_model_output", True))
 
 
-FRAMES = FrameSampling(load_prompt("video_v2"), max_frames=8, scene_threshold=0.3)
+FRAMES = FrameSampling(load_prompt("video_v3"), max_frames=8, scene_threshold=0.3)
 PREPARED = PreparedVideo(12.0, (Frame(0.0, b"\xff\xd8a"), Frame(4.2, b"\xff\xd8b"), Frame(11.96, b"\xff\xd8c")), b"m4a")
 
 
@@ -153,16 +169,16 @@ class VideoFramesTests(unittest.IsolatedAsyncioTestCase):
                     {"startSecond": 0.3, "text": "Inicio"}]
         model, preparer = FakeModel(self.video_output(timeline)), FakePreparer(PREPARED)
         result = await build(self.mp4, model, preparer, FRAMES).execute("job", reference(self.mp4, "video/mp4"))
-        self.assertEqual(preparer.calls, [("probe", "video/mp4"), ("prepare", 8, 0.3)])
+        self.assertEqual(preparer.calls, [("probe", "video/mp4"), ("sound", -50.0), ("prepare", 8, 0.3, True)])
         call = model.calls[0]
         parts = call["media"]
         self.assertEqual([(p.modality, p.mime_type, p.second) for p in parts], [
             (Modality.IMAGE, "image/jpeg", 0.0), (Modality.IMAGE, "image/jpeg", 4.2),
             (Modality.IMAGE, "image/jpeg", 11.96), (Modality.AUDIO, "audio/mp4", None)])
         self.assertIn("0, 4.2, 11.96", call["text"])
-        self.assertEqual(call["instructions"], load_prompt("video_v2").text)
+        self.assertEqual(call["instructions"], load_prompt("video_v3").text)
         self.assertEqual(call["schema_name"], "video_evidence")
-        self.assertEqual(result.provenance.prompt_version, "video-v2")
+        self.assertEqual(result.provenance.prompt_version, "video-v3")
         # Los segundos del modelo se anclan al fotograma más cercano.
         self.assertEqual([t.start_second for t in result.analysis.timeline], [0.0, 4.2, 11.96])
         self.assertEqual([t.text for t in result.analysis.timeline], ["Inicio", "Llega humo", "Fin"])
@@ -179,12 +195,12 @@ class VideoFramesTests(unittest.IsolatedAsyncioTestCase):
         preparer = FakePreparer(prepare_error=MediaPreparationError("timeout"))
         with self.assertLogs("app", level="WARNING"):
             result = await build(self.mp4, model, preparer, FRAMES).execute("job", reference(self.mp4, "video/mp4"))
-        self.assertEqual(result.provenance.prompt_version, "video-v1")
+        self.assertEqual(result.provenance.prompt_version, "video-v4")
         self.assertEqual(model.calls[0]["media"].data, self.mp4)
 
     async def test_failed_preparation_without_fallback_is_unreadable(self):
         model = FakeModel()
-        strict = FrameSampling(load_prompt("video_v2"), fallback_to_full=False)
+        strict = FrameSampling(load_prompt("video_v3"), fallback_to_full=False)
         for preparer in (FakePreparer(prepare_error=MediaPreparationError("x")), None):
             with self.assertRaises(AiError) as caught:
                 await build(self.mp4, model, preparer, strict).execute("job", reference(self.mp4, "video/mp4"))
@@ -194,8 +210,8 @@ class VideoFramesTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_mode_sends_the_video(self):
         model, preparer = FakeModel(self.video_output()), FakePreparer(PREPARED)
         result = await build(self.mp4, model, preparer).execute("job", reference(self.mp4, "video/mp4"))
-        self.assertEqual(preparer.calls, [("probe", "video/mp4")])
-        self.assertEqual(result.provenance.prompt_version, "video-v1")
+        self.assertEqual(preparer.calls, [("probe", "video/mp4"), ("sound", -50.0)])
+        self.assertEqual(result.provenance.prompt_version, "video-v4")
 
     async def test_measured_duration_is_enforced_for_any_format(self):
         webm = b"\x1a\x45\xdf\xa3" + bytes(32)
@@ -226,7 +242,110 @@ class VideoFramesTests(unittest.IsolatedAsyncioTestCase):
         preparer = FakePreparer(probe_error=MediaPreparationError("no instalado"))
         with self.assertLogs("app", level="WARNING"):
             result = await build(m4a, model, preparer).execute("job", reference(m4a, "audio/mp4"))
-        self.assertEqual(result.provenance.prompt_version, "audio-v1")
+        self.assertEqual(result.provenance.prompt_version, "audio-v2")
+
+
+class SilenceTests(unittest.IsolatedAsyncioTestCase):
+    """Un audio en silencio no llega al modelo; de un video sin sonido solo van los fotogramas."""
+
+    def setUp(self):
+        self.m4a = synthetic_bmff(21, b"M4A ")
+        self.mp4 = synthetic_bmff(12)
+
+    async def test_silent_audio_never_reaches_the_model(self):
+        model, preparer = FakeModel(), FakePreparer(sound=SILENT)
+        result = await build(self.m4a, model, preparer).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual(model.calls, [])
+        self.assertEqual(preparer.calls, [("probe", "audio/mp4"), ("sound", -50.0)])
+        analysis = result.analysis
+        self.assertIsNone(analysis.transcript)
+        self.assertEqual((analysis.event_type, analysis.severity), ("undetermined", Severity("undetermined", ())))
+        self.assertEqual((analysis.observations, analysis.hazards, analysis.risks, analysis.people), ((), (), (), None))
+        self.assertEqual(analysis.summary, "El audio no tiene sonido audible.")
+        self.assertEqual(analysis.limitations, ("El audio está en silencio o casi en silencio: no se puede saber qué pasa.",))
+        provenance = result.provenance
+        self.assertEqual((provenance.provider, provenance.model, provenance.prompt_version, provenance.method),
+                         (None, None, None, "silent_audio"))
+        body = analysis_response(result)
+        self.assertEqual(body["schemaVersion"], "evidence-analysis.v1")
+        self.assertEqual(set(body["analysis"]), set(analysis_payload()))
+        self.assertIsNone(body["analysis"]["transcript"])
+
+    async def test_an_isolated_click_is_silence(self):
+        model = FakeModel()
+        click = FakePreparer(sound=SoundLevel(-20.0, -70.0, 0.05))
+        result = await build(self.m4a, model, click).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual((model.calls, result.provenance.method), ([], "silent_audio"))
+
+    async def test_audible_audio_is_analyzed_by_the_model(self):
+        model = FakeModel(evidence_output(transcript="Hay [nombre] herido"))
+        result = await build(self.m4a, model, FakePreparer()).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual((result.provenance.method, result.provenance.prompt_version), ("model", "audio-v2"))
+        self.assertEqual(result.analysis.transcript, "Hay [nombre] herido")
+
+    async def test_failed_measurement_keeps_analyzing(self):
+        model = FakeModel(evidence_output(transcript="Ayuda"))
+        preparer = FakePreparer(sound_error=MediaPreparationError("timeout"))
+        with self.assertLogs("app", level="WARNING"):
+            result = await build(self.m4a, model, preparer).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual((len(model.calls), result.analysis.transcript), (1, "Ayuda"))
+
+    async def test_silent_video_sends_only_frames_and_says_so(self):
+        timeline = [{"startSecond": 0, "text": "Una persona en el suelo"}]
+        model = FakeModel(evidence_output(transcript=None, timeline=timeline))
+        preparer = FakePreparer(PreparedVideo(12.0, PREPARED.frames, None), sound=SILENT)
+        result = await build(self.mp4, model, preparer, FRAMES).execute("job", reference(self.mp4, "video/mp4"))
+        # La pista en silencio ni se extrae: el preparador recibe el video como si no tuviera audio.
+        self.assertEqual(preparer.calls, [("probe", "video/mp4"), ("sound", -50.0), ("prepare", 8, 0.3, False)])
+        call = model.calls[0]
+        self.assertTrue(all(p.modality is Modality.IMAGE for p in call["media"]))
+        self.assertIn("no tiene sonido audible", call["text"])
+        self.assertIn("transcript debe ser null", call["text"])
+        self.assertNotIn("pista de audio completa", call["text"])
+        self.assertEqual((result.provenance.method, result.provenance.prompt_version), ("model", "video-v3"))
+        self.assertIsNone(result.analysis.transcript)
+
+    async def test_transcript_of_a_silent_video_is_dropped(self):
+        for frames in (FRAMES, None):
+            model = FakeModel(evidence_output(transcript="Se cayó de la escalera", timeline=[]))
+            preparer = FakePreparer(PreparedVideo(12.0, PREPARED.frames, None), sound=SILENT)
+            with self.assertLogs("app", level="WARNING") as logs:
+                result = await build(self.mp4, model, preparer, frames).execute("job", reference(self.mp4, "video/mp4"))
+            self.assertIsNone(result.analysis.transcript)
+            self.assertIn("se descartó una transcripción", result.analysis.limitations[-1])
+            self.assertIn("no tiene sonido audible", model.calls[0]["text"])
+            self.assertNotIn("escalera", "".join(logs.output))
+
+    async def test_video_without_audio_track_is_not_measured(self):
+        preparer = FakePreparer(PreparedVideo(12.0, PREPARED.frames, None), info=MediaInfo(12.0, True, False))
+        model = FakeModel(evidence_output(transcript=None, timeline=[]))
+        await build(self.mp4, model, preparer, FRAMES).execute("job", reference(self.mp4, "video/mp4"))
+        self.assertNotIn(("sound", -50.0), preparer.calls)
+        self.assertIn("El video no tiene audio.", model.calls[0]["text"])
+
+    async def test_without_preparer_the_model_is_called(self):
+        model = FakeModel(evidence_output(transcript=""))
+        result = await build(self.m4a, model).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual(len(model.calls), 1)
+        self.assertIsNone(result.analysis.transcript)  # una cadena vacía es lo mismo que null
+
+
+class SilencePolicyTests(unittest.TestCase):
+    def test_thresholds(self):
+        policy = SilencePolicy()
+        self.assertTrue(policy.is_silent(SoundLevel(-91.0, -91.0, 0.0)))  # silencio digital
+        self.assertTrue(policy.is_silent(SoundLevel(-76.3, -91.0, 0.0)))  # el micrófono apagado del incidente
+        self.assertTrue(policy.is_silent(SoundLevel(-math.inf, None, 0.0)))  # sin muestras
+        self.assertTrue(policy.is_silent(SoundLevel(-10.0, -60.0, 0.29)))  # un golpe aislado
+        self.assertFalse(policy.is_silent(SoundLevel(-49.0, -65.0, 0.3)))
+        self.assertFalse(policy.is_silent(SoundLevel(-12.0, -30.0, 8.0)))
+        self.assertFalse(SilencePolicy(min_audible_seconds=0).is_silent(SoundLevel(-10.0, -60.0, 0.0)))
+
+    def test_invalid_thresholds(self):
+        for kwargs in ({"max_volume_db": 1.0}, {"min_audible_seconds": -1.0}):
+            with self.assertRaises(ValueError):
+                SilencePolicy(**kwargs)
 
 
 def analysis(summary="Choque entre dos autos.", **overrides):
@@ -374,3 +493,7 @@ class SchemaTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertIn("timeline", schema["required"])
         self.assertFalse(schema["properties"]["timeline"]["items"]["additionalProperties"])
+        # Sin habla inteligible el modelo puede (y debe) devolver null.
+        for output in (AudioOutput, VideoOutput):
+            transcript = json_schema(output)["properties"]["transcript"]
+            self.assertEqual([option["type"] for option in transcript["anyOf"]], ["string", "null"])

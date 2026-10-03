@@ -14,7 +14,7 @@ import math
 import tempfile
 from pathlib import Path
 
-from app.application.ports.media_preparer import Frame, MediaInfo, MediaPreparationError, PreparedVideo
+from app.application.ports.media_preparer import Frame, MediaInfo, MediaPreparationError, PreparedVideo, SoundLevel
 from app.domain.errors import AiError
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ PROBE_LIMITS = ["-probesize", "10000000", "-analyzeduration", "10000000"]
 INPUT_NAME = "entrada"
 SCENE_WIDTH = 320
 FRAME_MAX_SIDE = 1280
+# Un silencio más corto que esto (la pausa entre palabras) cuenta como sonido al sumar lo audible.
+MIN_SILENCE_SECONDS = 0.5
 
 
 def _input_args(mime_type: str) -> list[str]:
@@ -100,6 +102,41 @@ def parse_scene_scores(text: str) -> tuple[list[float], list[float]]:
     return times, scores
 
 
+def parse_sound_level(text: str) -> SoundLevel:
+    """Lee los registros de `volumedetect` y `silencedetect` que ffmpeg escribe en stderr.
+
+    Sin `max_volume` la pista no tiene muestras. El audio termina siempre en silencio (se agrega
+    relleno), así que lo audible es lo que hay antes de cada `silence_start` desde el último `silence_end`.
+    """
+    max_volume = mean_volume = None
+    audible, cursor, silent = 0.0, 0.0, False
+    for line in text.splitlines():
+        _, _, message = line.partition("] ")
+        key, _, value = message.partition(":")
+        number = value.split("|", 1)[0].replace("dB", "").strip()
+        if key == "max_volume":
+            max_volume = _decibels(number)
+        elif key == "mean_volume":
+            mean_volume = _decibels(number)
+        elif key == "silence_start" and not silent:
+            audible += max(0.0, (_number(number) or 0.0) - cursor)
+            silent = True
+        elif key == "silence_end":
+            cursor = _number(number) or cursor
+            silent = False
+    if max_volume is None:
+        return SoundLevel(-math.inf, None, 0.0)
+    return SoundLevel(max_volume, mean_volume, round(audible, 3))
+
+
+def _decibels(value: str) -> float | None:
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) or number == -math.inf else None
+
+
 class FfmpegPreparer:
     def __init__(
         self, timeout: float = 10.0, max_concurrent: int = 4, ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe",
@@ -109,17 +146,18 @@ class FfmpegPreparer:
         self.ffmpeg = ffmpeg
         self.ffprobe = ffprobe
 
-    async def _run(self, workdir: Path, *args: str) -> bytes:
-        """Ejecuta una herramienta sin shell ni stdin; devuelve stdout o falla sin exponer la salida."""
+    async def _run(self, workdir: Path, *args: str, stderr: bool = False) -> bytes:
+        """Ejecuta una herramienta sin shell ni stdin; devuelve stdout (o stderr) sin registrarlo nunca."""
         try:
             process = await asyncio.create_subprocess_exec(
                 *args, cwd=workdir, stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL if stderr else asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE if stderr else asyncio.subprocess.DEVNULL,
             )
         except OSError as exc:
             raise MediaPreparationError("herramienta no disponible") from exc
         try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), self.timeout)
+            stdout, errors = await asyncio.wait_for(process.communicate(), self.timeout)
         except asyncio.TimeoutError as exc:
             process.kill()
             await process.wait()
@@ -131,7 +169,7 @@ class FfmpegPreparer:
             raise
         if process.returncode != 0:
             raise _ToolFailed(process.returncode)
-        return stdout
+        return errors if stderr else stdout
 
     def _ffmpeg(self, *args: str) -> list[str]:
         return [self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *args]
@@ -178,6 +216,26 @@ class FfmpegPreparer:
                 workdir = Path(directory)
                 await asyncio.to_thread((workdir / INPUT_NAME).write_bytes, data)
                 return await self._probe(workdir, mime_type)
+
+    async def measure_sound(self, data: bytes, mime_type: str, noise_db: float) -> SoundLevel:
+        """Pico, promedio y segundos audibles de la primera pista de audio, en una sola pasada.
+
+        `volumedetect` y `silencedetect` solo informan por el registro (nivel info), así que se lee stderr.
+        """
+        noise = f"{noise_db:g}dB"
+        audio_filter = (f"asetpts=PTS-STARTPTS,volumedetect,apad=pad_dur={MIN_SILENCE_SECONDS + 0.1:g},"
+                        f"silencedetect=noise={noise}:duration={MIN_SILENCE_SECONDS:g}")
+        async with self.limiter:
+            with tempfile.TemporaryDirectory(prefix="mia-") as directory:
+                workdir = Path(directory)
+                await asyncio.to_thread((workdir / INPUT_NAME).write_bytes, data)
+                try:
+                    raw = await self._run(workdir, self.ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-v", "info",
+                                          *_input_args(mime_type), "-vn", "-sn", "-dn", "-map", "0:a:0",
+                                          "-af", audio_filter, "-f", "null", "-", stderr=True)
+                except (_ToolFailed, AiError) as exc:
+                    raise MediaPreparationError("no se pudo medir el sonido") from exc
+        return parse_sound_level(raw.decode("utf-8", "replace"))
 
     async def prepare_video(
         self, data: bytes, mime_type: str, info: MediaInfo, max_frames: int, scene_threshold: float,
