@@ -66,3 +66,22 @@ class PolicyTests(unittest.TestCase):
         self.assertIs(modality_of("video/quicktime"), Modality.VIDEO)
         with self.assertRaises(AiError):
             modality_of("application/pdf")
+
+
+class DefaultLimitTests(unittest.TestCase):
+    def test_audio_defaults_match_the_backend(self):
+        from app.core.config import Settings
+
+        config = Settings(_env_file=None)
+        self.assertEqual((config.audio_max_seconds, config.audio_max_bytes), (120, 5 * 1024 * 1024))
+        audio = MediaPolicy(Modality.AUDIO, AUDIO_MIME_TYPES, config.audio_max_bytes, config.audio_max_seconds)
+        ok = synthetic_bmff(120, b"M4A ")
+        audio.validate(ok, "audio/mp4", digest(ok))
+        long = synthetic_bmff(121, b"M4A ")
+        with self.assertRaises(AiError) as caught:
+            audio.validate(long, "audio/mp4", digest(long))
+        self.assertEqual(caught.exception.code, "duration_exceeded")
+        big = synthetic_wav(1) + bytes(config.audio_max_bytes)
+        with self.assertRaises(AiError) as caught:
+            audio.validate(big, "audio/wav", digest(big))
+        self.assertEqual(caught.exception.code, "evidence_too_large")
