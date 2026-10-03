@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # Si no se pueden preparar los fotogramas: true envía el video completo; false responde unreadable_media.
     video_fallback_to_full: bool = True
     ffmpeg_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Control de silencio (necesita ffmpeg): un audio cuyo pico no llega a este nivel en dBFS, o cuyo sonido
+    # por encima de él dura menos que el mínimo, se considera en silencio y no se envía al modelo.
+    silence_max_volume_db: float = Field(default=-50.0, le=0)
+    silence_min_audible_seconds: float = Field(default=0.3, ge=0)
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", env_prefix="AI_", extra="ignore"
