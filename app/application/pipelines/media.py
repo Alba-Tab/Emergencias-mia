@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 
+from app.application.ports.media_preparer import SoundLevel
 from app.domain.errors import AiError
 from app.domain.evidence_reference import Modality
 
@@ -144,6 +145,26 @@ class MediaPolicy:
         """Duración medida fuera de este módulo; `None` significa que no se pudo medir."""
         if self.max_seconds is not None and seconds is not None and seconds > self.max_seconds:
             raise AiError("duration_exceeded")
+
+
+@dataclass(frozen=True, slots=True)
+class SilencePolicy:
+    """Cuándo una pista de audio no tiene sonido audible y no vale la pena enviarla al modelo.
+
+    Un modelo que recibe silencio puede inventar una transcripción verosímil; por eso se decide
+    antes, con datos medidos. Es en silencio si el pico no llega a `max_volume_db` o si lo que supera
+    ese nivel dura menos de `min_audible_seconds` (un clic o un golpe aislado no es habla).
+    """
+
+    max_volume_db: float = -50.0
+    min_audible_seconds: float = 0.3
+
+    def __post_init__(self) -> None:
+        if self.max_volume_db > 0 or self.min_audible_seconds < 0:
+            raise ValueError("Umbral de silencio inválido")
+
+    def is_silent(self, level: SoundLevel) -> bool:
+        return level.max_volume_db < self.max_volume_db or level.audible_seconds < self.min_audible_seconds
 
 
 IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
