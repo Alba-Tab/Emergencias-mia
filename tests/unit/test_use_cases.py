@@ -493,3 +493,7 @@ class SchemaTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertIn("timeline", schema["required"])
         self.assertFalse(schema["properties"]["timeline"]["items"]["additionalProperties"])
+        # Sin habla inteligible el modelo puede (y debe) devolver null.
+        for output in (AudioOutput, VideoOutput):
+            transcript = json_schema(output)["properties"]["transcript"]
+            self.assertEqual([option["type"] for option in transcript["anyOf"]], ["string", "null"])
