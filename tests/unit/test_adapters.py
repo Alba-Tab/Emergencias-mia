@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import httpx
 
-from app.adapters.outbound.providers.openrouter_model import OpenRouterModel, media_content
+from app.adapters.outbound.providers.openrouter_model import OpenRouterModel, media_content, user_content
 from app.adapters.outbound.storage.http_evidence_reader import HttpEvidenceReader
 from app.application.ports.multimodal_model import MediaPart
 from app.core.net import valid_download_url
@@ -103,6 +103,17 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audio["input_audio"]["format"], "m4a")
         video = media_content(MediaPart(Modality.VIDEO, "video/quicktime", b"x"))
         self.assertTrue(video["video_url"]["url"].startswith("data:video/mov;base64,"))
+
+    def test_frames_and_audio_go_in_one_message(self):
+        parts = (MediaPart(Modality.IMAGE, "image/jpeg", b"a", 0.0), MediaPart(Modality.IMAGE, "image/jpeg", b"b", 2.5),
+                 MediaPart(Modality.AUDIO, "audio/mp4", b"c"))
+        content = user_content("analiza", parts)
+        self.assertEqual([part["type"] for part in content],
+                         ["text", "text", "image_url", "text", "image_url", "input_audio"])
+        self.assertEqual(content[1]["text"], "Fotograma del segundo 0:")
+        self.assertEqual(content[3]["text"], "Fotograma del segundo 2.5:")
+        self.assertEqual(content[5]["input_audio"]["format"], "m4a")
+        self.assertEqual(user_content("solo texto", None), [{"type": "text", "text": "solo texto"}])
 
     async def test_payload_and_reply(self):
         seen = []

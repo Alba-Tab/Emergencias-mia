@@ -9,13 +9,15 @@ El análisis es apoyo informativo para el personal. No es un diagnóstico, no es
 | Capa | Contenido |
 |---|---|
 | `domain/` | Resultado de evidencia, resumen de incidente, vocabularios cerrados (`eventType`, `hazards`, `severity`) y reglas: una gravedad sin justificación pasa a `undetermined`; un rango de personas incoherente pasa a desconocido; en el resumen se descartan las citas a fuentes no recibidas y las afirmaciones que se quedan sin ninguna fuente válida. |
-| `application/` | `AnalyzeEvidence` (una evidencia), `SynthesizeIncidentSummary` (todas las del incidente), límites por modalidad (`pipelines/media.py`), esquemas de salida estructurada y los puertos `EvidenceReader` y `MultimodalModel`. No importa FastAPI ni clientes de proveedores. |
-| `adapters/` | HTTP de entrada, descarga con URL temporal y `OpenRouterModel`, el único adaptador de proveedor para las tres modalidades y la síntesis. |
-| `prompts/` | Un archivo por prompt; el nombre del archivo es la versión que se registra en cada resultado (`image-v2`, `audio-v1`, `video-v1`, `summary-v1`). |
+| `application/` | `AnalyzeEvidence` (una evidencia), `SynthesizeIncidentSummary` (todas las del incidente), límites por modalidad (`pipelines/media.py`), esquemas de salida estructurada y los puertos `EvidenceReader`, `MultimodalModel` y `MediaPreparer`. No importa FastAPI ni clientes de proveedores. |
+| `adapters/` | HTTP de entrada, descarga con URL temporal, `OpenRouterModel` (el adaptador de proveedor para las tres modalidades y la síntesis), `PruebaModel` (el analizador de prueba) y `FfmpegPreparer` (`media/ffmpeg_preparer.py`), que mide la duración real con ffprobe, mide el volumen del audio y reduce el video a fotogramas y audio con ffmpeg. |
+| `prompts/` | Un archivo por prompt; el nombre del archivo es la versión que se registra en cada resultado (`image-v2`, `audio-v2`, `video-v3` para fotogramas, `video-v4` para el video completo, `summary-v1`). Los archivos de versiones anteriores quedan como historial y ya no se cargan. |
 
 Imagen, audio y video comparten el caso de uso. Cada modalidad solo define sus límites, su prompt, su esquema y, opcionalmente, su modelo (`ModalityProfile`). Para cambiar de proveedor o usar un modelo local se escribe otro adaptador de `MultimodalModel`.
 
 ## Configuración y arranque
+
+Para medir la duración real y analizar el video por fotogramas hacen falta `ffmpeg` y `ffprobe` (en macOS, `brew install ffmpeg`). Sin ellos el servicio arranca igual: la duración se lee de la cabecera, el video se envía completo y no hay control de silencio (se registra una advertencia al arrancar). La imagen Docker ya los instala.
 
 ```sh
 python3 -m venv .venv
@@ -30,7 +32,11 @@ docker build -t emergencias-mia .
 docker run --env-file .env -p 127.0.0.1:8000:8000 emergencias-mia
 ```
 
-`GET /health` no requiere configuración. Para los endpoints `/v1` hacen falta `AI_SERVICE_TOKEN` y `AI_OPENROUTER_API_KEY` en `.env` (ignorado por git) o en variables de entorno; sin ellos responden `503 service_not_configured`. `.env.example` documenta los modelos por tarea y los límites. IA no configura buckets ni credenciales AWS: el backend entrega URLs temporales de lectura.
+`GET /health` no requiere configuración. Para los endpoints `/v1` hacen falta `AI_SERVICE_TOKEN` y `AI_OPENROUTER_API_KEY` en `.env` (ignorado por git) o en variables de entorno; sin ellos responden `503 service_not_configured`.
+
+### Analizador de prueba
+
+Con `AI_PROVIDER=prueba` el servicio no llama a ningún proveedor: `PruebaModel` devuelve salidas fijas que cumplen el esquema de cada modalidad (observaciones y peligros en imagen, transcripción enmascarada en audio, línea de tiempo en video) y un resumen que cita solo las fuentes recibidas. No hace falta `AI_OPENROUTER_API_KEY`, pero `AI_SERVICE_TOKEN` sigue siendo obligatorio. La validación del archivo (MIME, tamaño, firma, SHA-256 y duración) se hace igual que con el proveedor real. Los resultados llevan `provenance.provider = "prueba"` y una limitación que aclara que no vienen de un modelo, para que nadie los confunda con un análisis real. Sirve para probar el backend y las apps sin clave ni costo; no se usa en producción. `.env.example` documenta los modelos por tarea y los límites. IA no configura buckets ni credenciales AWS: el backend entrega URLs temporales de lectura.
 
 ## Contrato
 
@@ -53,10 +59,36 @@ Todas las llamadas llevan `Authorization: Bearer <AI_SERVICE_TOKEN>` y son **sí
 | Modalidad | MIME admitidos | Límite por defecto |
 |---|---|---|
 | Imagen | `image/jpeg`, `image/png`, `image/webp` | 10 MiB |
-| Audio | `audio/mp4`, `audio/m4a`, `audio/x-m4a`, `audio/mpeg`, `audio/aac`, `audio/wav`, `audio/x-wav`, `audio/ogg` | 20 MiB y 300 s |
+| Audio | `audio/mp4`, `audio/m4a`, `audio/x-m4a`, `audio/mpeg`, `audio/aac`, `audio/wav`, `audio/x-wav`, `audio/ogg` | 5 MiB (igual que el backend) y 120 s |
 | Video | `video/mp4`, `video/quicktime`, `video/webm` | 20 MiB y 60 s |
 
-Antes de llamar al modelo se comprueban, en este orden: el MIME, que el archivo no esté vacío, el tamaño, la firma de bytes, el SHA-256 y la duración. La duración se lee del contenedor en MP4/M4A/MOV y WAV; en los demás formatos solo se limita el tamaño. Respuesta `200`:
+Antes de llamar al modelo se comprueban, en este orden: el MIME, que el archivo no esté vacío, el tamaño, la firma de bytes, el SHA-256 y la duración. La duración se lee primero de la cabecera en MP4/M4A/MOV y WAV, y después ffprobe mide la duración real de audio y video en todos los formatos admitidos (en un WebM sin duración declarada, recorriendo sus paquetes). Un archivo que ffprobe no puede leer se rechaza con `unreadable_media`. Si ffprobe no está instalado o no responde a tiempo, queda solo el control por cabecera.
+
+#### Video por fotogramas
+
+Con `AI_VIDEO_MODE=frames` (por defecto) el modelo no recibe el video completo. ffmpeg elige hasta `AI_VIDEO_MAX_FRAMES` fotogramas (8): siempre el primero y el último, luego los cambios de escena cuyo puntaje supera `AI_VIDEO_SCENE_THRESHOLD` (0.3) y el resto repartido de forma uniforme. Cada fotograma va en JPEG con el lado mayor reducido a 1280 px como máximo (sin agrandar los más chicos) y precedido por su segundo exacto. Si el video tiene sonido audible, la pista se envía aparte en M4A (AAC mono); si no tiene pista o está en silencio, solo los fotogramas (ver control de silencio). El prompt es `video-v3` y la salida tiene el mismo esquema que antes (con `transcript` y `timeline`). Los `startSecond` de la línea de tiempo se ajustan al segundo de fotograma más cercano, porque el modelo solo vio esos instantes.
+
+Comparado con el video entero, la solicitud al proveedor pesa mucho menos (unas decenas o cientos de KB por fotograma más el audio, en lugar del archivo completo en base64) y usa menos tokens de entrada. El costo es que lo que pasa entre dos fotogramas no se ve: el modelo solo lo conoce por el audio.
+
+Si no se pueden preparar los fotogramas (ffmpeg no instalado, timeout o error), con `AI_VIDEO_FALLBACK_TO_FULL=true` (por defecto) se envía el video completo con el prompt `video-v4`; con `false` se responde `unreadable_media`. `AI_VIDEO_MODE=full` mantiene el comportamiento anterior. Cada proceso de ffmpeg corre sin stdin, solo con archivos locales (`-protocol_whitelist file`), con el formato de entrada fijado por el MIME, límites de sondeo y un timeout propio (`AI_FFMPEG_TIMEOUT_SECONDS`=10). Los archivos temporales se borran siempre y nunca se registra su contenido.
+
+#### Control de silencio
+
+Un modelo que recibe un audio en silencio puede inventar una transcripción verosímil (pasó con un audio de 21 s grabado con el micrófono del emulador apagado: el modelo devolvió una caída de una escalera con sangrado, marcada como observada). Por eso, antes de llamar al modelo, ffmpeg mide la primera pista de audio de cada audio y video en una sola pasada (`volumedetect` para el pico y `silencedetect` para los segundos con sonido), con las mismas medidas de seguridad que el resto de los procesos. La pista está en silencio si:
+
+- su pico no llega a `AI_SILENCE_MAX_VOLUME_DB` (-50 dBFS), o
+- lo que supera ese nivel dura menos de `AI_SILENCE_MIN_AUDIBLE_SECONDS` (0.3 s). Las pausas de menos de 0.5 s cuentan como sonido, igual que las pausas entre palabras.
+
+Los valores por defecto son conservadores: el silencio digital mide unos -91 dBFS y un micrófono apagado, unos -76; el habla normal grabada con un teléfono tiene picos entre -30 y -6 dBFS, y el ruido de fondo de una habitación tranquila queda cerca de -60. Con -50 solo se descarta lo que es casi silencio, sin arriesgar un audio real en voz baja. Los 0.3 s descartan un clic o un golpe aislado, pero no una palabra corta como «ayuda». `AI_SILENCE_MIN_AUDIBLE_SECONDS=0` desactiva el segundo criterio, y un umbral de -100 desactiva el control.
+
+- **Audio en silencio:** no se llama al modelo. La respuesta es un análisis válido con `transcript: null`, sin observaciones, peligros ni riesgos, `eventType` y `severity` en `undetermined`, `summary` «El audio no tiene sonido audible.» y la limitación «El audio está en silencio o casi en silencio: no se puede saber qué pasa.». En `provenance`, `method` es `"silent_audio"` y `provider`, `model` y `promptVersion` son `null`, para que el backend y la app lo distingan de un análisis del modelo.
+- **Video con la pista en silencio:** con fotogramas, la pista no se extrae ni se envía; el mensaje al modelo dice que el video no tiene sonido audible y que `transcript` debe ser `null`. Con el video completo se agrega el mismo aviso.
+- **Si el modelo igual devuelve una transcripción** de un audio medido como silencio, se descarta y se agrega una limitación que lo explica.
+- **Si ffmpeg no está o la medición falla,** se analiza como antes y se registra una advertencia; quedan las reglas de los prompts.
+
+Los prompts `audio-v2`, `video-v3` y `video-v4` piden transcribir solo el habla que se oye con claridad, sin completar, adivinar ni inventar palabras, y escribir `[inaudible]` en los fragmentos que no se entienden. Sin habla inteligible, `transcript` es `null` y se dice en `limitations`. Lo que dice una persona solo es `basis: "observed"` si de verdad se oyó.
+
+Respuesta `200`:
 
 ```json
 {
@@ -78,7 +110,7 @@ Antes de llamar al modelo se comprueban, en este orden: el MIME, que el archivo 
 }
 ```
 
-`transcript` aparece en audio y video (con nombres y teléfonos enmascarados), y `timeline` (`startSecond` y `text`) en video. `basis` distingue lo observado de lo inferido. No hay confianza numérica.
+`transcript` aparece en audio y video (con nombres y teléfonos enmascarados) y es `null` si no hay habla inteligible. `timeline` (`startSecond` y `text`) aparece en video. `basis` distingue lo observado de lo inferido. No hay confianza numérica.
 
 ### `POST /v1/summaries`: resumen del incidente
 
@@ -119,7 +151,7 @@ Todos tienen la forma `{"errorCode": "...", "retryable": true|false}`.
 
 ### Tiempos
 
-Cada descarga y cada llamada al proveedor se intenta como máximo dos veces, con un timeout por intento (`AI_DOWNLOAD_TIMEOUT_SECONDS`=20, `AI_PROVIDER_TIMEOUT_SECONDS`=90). El peor caso es de unos 225 s. El timeout de lectura del cliente en el backend debe ser mayor (por ejemplo, 240 s), y la URL temporal debe durar al menos ese tiempo. `AI_MAX_CONCURRENT_MODEL_CALLS` limita las llamadas simultáneas al proveedor.
+Cada descarga y cada llamada al proveedor se intenta como máximo dos veces, con un timeout por intento (`AI_DOWNLOAD_TIMEOUT_SECONDS`=20, `AI_PROVIDER_TIMEOUT_SECONDS`=90). Para audio y video se suman los procesos de ffprobe/ffmpeg, cada uno con `AI_FFMPEG_TIMEOUT_SECONDS`=10: normalmente tardan uno o dos segundos, pero en el peor caso agregan unos 50 s. El peor caso total es de unos 275 s. El timeout de lectura del cliente en el backend debe ser mayor (por ejemplo, 280 s), y la URL temporal debe durar al menos ese tiempo. `AI_MAX_CONCURRENT_MODEL_CALLS` limita las llamadas simultáneas al proveedor.
 
 ## Pruebas
 

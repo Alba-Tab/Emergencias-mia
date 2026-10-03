@@ -32,6 +32,11 @@ def _not_blank(value: str) -> str:
     return value
 
 
+def _transcript(value: str | None) -> str | None:
+    """Sin habla inteligible la transcripción es `null`; una cadena vacía significa lo mismo."""
+    return clip(value, MAX_TRANSCRIPT) if value and value.strip() else None
+
+
 class FindingOut(_Strict):
     text: str
     basis: Basis
@@ -70,10 +75,10 @@ class EvidenceOutput(_Strict):
 
 
 class AudioOutput(EvidenceOutput):
-    transcript: str
+    transcript: str | None
 
     def to_domain(self) -> EvidenceAnalysis:
-        return self._common(transcript=clip(self.transcript, MAX_TRANSCRIPT))
+        return self._common(transcript=_transcript(self.transcript))
 
 
 class TimedOut(_Strict):
@@ -82,7 +87,7 @@ class TimedOut(_Strict):
 
 
 class VideoOutput(EvidenceOutput):
-    transcript: str
+    transcript: str | None
     timeline: list[TimedOut]
 
     def to_domain(self) -> EvidenceAnalysis:
@@ -90,7 +95,7 @@ class VideoOutput(EvidenceOutput):
             (TimedObservation(t.startSecond, clip(t.text)) for t in self.timeline if t.text.strip()),
             key=lambda t: t.start_second,
         ))[:MAX_ITEMS]
-        return self._common(transcript=clip(self.transcript, MAX_TRANSCRIPT), timeline=timeline)
+        return self._common(transcript=_transcript(self.transcript), timeline=timeline)
 
 
 class SourcedOut(_Strict):
