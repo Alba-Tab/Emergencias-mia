@@ -72,7 +72,7 @@ class PruebaAnalysisTests(unittest.IsolatedAsyncioTestCase):
         preparer = FakePreparer(PreparedVideo(4.0, (Frame(0.0, b"a"), Frame(2.5, b"b"), Frame(3.96, b"c")), b"m4a"))
         video = await self.analyze(synthetic_bmff(4), "video/mp4", preparer)
         self.assertEqual([t.start_second for t in video.analysis.timeline], [0.0, 2.5, 3.96])
-        self.assertEqual(video.provenance.prompt_version, "video-v2")
+        self.assertEqual(video.provenance.prompt_version, "video-v3")
         self.assertTrue(video.analysis.transcript)
 
         silent = FakePreparer(PreparedVideo(4.0, (Frame(0.0, b"a"), Frame(3.9, b"b")), None))
