@@ -13,7 +13,9 @@ from app.adapters.outbound.media.ffmpeg_preparer import FfmpegPreparer
 from app.adapters.outbound.providers.openrouter_model import OpenRouterModel
 from app.adapters.outbound.providers.prueba_model import PruebaModel
 from app.adapters.outbound.storage.http_evidence_reader import HttpEvidenceReader
-from app.application.pipelines.media import AUDIO_MIME_TYPES, IMAGE_MIME_TYPES, VIDEO_MIME_TYPES, MediaPolicy
+from app.application.pipelines.media import (
+    AUDIO_MIME_TYPES, IMAGE_MIME_TYPES, VIDEO_MIME_TYPES, MediaPolicy, SilencePolicy,
+)
 from app.application.ports.media_preparer import MediaPreparer
 from app.application.ports.multimodal_model import MultimodalModel
 from app.application.prompts import load_prompt
@@ -27,9 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 def build_preparer(config: Settings) -> MediaPreparer | None:
-    """ffprobe/ffmpeg si están instalados; sin ellos la duración se lee de la cabecera y el video va entero."""
+    """ffprobe/ffmpeg si están instalados; sin ellos la duración se lee de la cabecera, el video va entero
+    y no hay control de silencio."""
     if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
-        logger.warning("ffmpeg/ffprobe no están instalados: duración por cabecera y video completo")
+        logger.warning("ffmpeg/ffprobe no están instalados: duración por cabecera, video completo "
+                       "y sin control de silencio del audio")
         return None
     return FfmpegPreparer(config.ffmpeg_timeout_seconds, config.max_concurrent_model_calls)
 
@@ -62,17 +66,20 @@ def build_services(config: Settings, client: httpx.AsyncClient) -> Services | No
         ),
         Modality.AUDIO: ModalityProfile(
             MediaPolicy(Modality.AUDIO, AUDIO_MIME_TYPES, config.audio_max_bytes, config.audio_max_seconds),
-            load_prompt("audio_v1"), AudioOutput, model(config.audio_model),
+            load_prompt("audio_v2"), AudioOutput, model(config.audio_model),
         ),
         Modality.VIDEO: ModalityProfile(
             MediaPolicy(Modality.VIDEO, VIDEO_MIME_TYPES, config.video_max_bytes, config.video_max_seconds),
-            load_prompt("video_v1"), VideoOutput, model(config.video_model),
-            FrameSampling(load_prompt("video_v2"), config.video_max_frames, config.video_scene_threshold,
+            load_prompt("video_v4"), VideoOutput, model(config.video_model),
+            FrameSampling(load_prompt("video_v3"), config.video_max_frames, config.video_scene_threshold,
                           config.video_fallback_to_full) if config.video_mode == "frames" else None,
         ),
     }
     reader = HttpEvidenceReader(client, timeout=config.download_timeout_seconds)
     return Services(
-        analyze=AnalyzeEvidence(reader, profiles, preparer=build_preparer(config)),
+        analyze=AnalyzeEvidence(
+            reader, profiles, preparer=build_preparer(config),
+            silence=SilencePolicy(config.silence_max_volume_db, config.silence_min_audible_seconds),
+        ),
         synthesize=SynthesizeIncidentSummary(model(config.summary_model), load_prompt("summary_v1")),
     )
