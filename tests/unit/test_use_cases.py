@@ -1,9 +1,12 @@
 import json
+import math
 import unittest
 from datetime import datetime, timezone
 from hashlib import sha256
 
-from app.application.pipelines.media import AUDIO_MIME_TYPES, IMAGE_MIME_TYPES, VIDEO_MIME_TYPES, MediaPolicy
+from app.application.pipelines.media import (
+    AUDIO_MIME_TYPES, IMAGE_MIME_TYPES, VIDEO_MIME_TYPES, MediaPolicy, SilencePolicy,
+)
 from app.application.ports.media_preparer import Frame, MediaInfo, MediaPreparationError, PreparedVideo, SoundLevel
 from app.application.ports.multimodal_model import ModelReply
 from app.application.prompts import load_prompt
@@ -14,7 +17,8 @@ from app.domain.analysis_result import EvidenceAnalysis, Finding, PeopleRange, S
 from app.domain.errors import AiError
 from app.domain.evidence_reference import EvidenceReference, Modality
 from app.domain.incident_summary import AlertContext, EvidenceInput, SynthesisInput
-from tests.fixtures import evidence_output, synthetic_bmff, synthetic_png
+from app.schemas.analysis import analysis_response
+from tests.fixtures import analysis_payload, evidence_output, synthetic_bmff, synthetic_png
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 
@@ -239,6 +243,109 @@ class VideoFramesTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("app", level="WARNING"):
             result = await build(m4a, model, preparer).execute("job", reference(m4a, "audio/mp4"))
         self.assertEqual(result.provenance.prompt_version, "audio-v2")
+
+
+class SilenceTests(unittest.IsolatedAsyncioTestCase):
+    """Un audio en silencio no llega al modelo; de un video sin sonido solo van los fotogramas."""
+
+    def setUp(self):
+        self.m4a = synthetic_bmff(21, b"M4A ")
+        self.mp4 = synthetic_bmff(12)
+
+    async def test_silent_audio_never_reaches_the_model(self):
+        model, preparer = FakeModel(), FakePreparer(sound=SILENT)
+        result = await build(self.m4a, model, preparer).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual(model.calls, [])
+        self.assertEqual(preparer.calls, [("probe", "audio/mp4"), ("sound", -50.0)])
+        analysis = result.analysis
+        self.assertIsNone(analysis.transcript)
+        self.assertEqual((analysis.event_type, analysis.severity), ("undetermined", Severity("undetermined", ())))
+        self.assertEqual((analysis.observations, analysis.hazards, analysis.risks, analysis.people), ((), (), (), None))
+        self.assertEqual(analysis.summary, "El audio no tiene sonido audible.")
+        self.assertEqual(analysis.limitations, ("El audio está en silencio o casi en silencio: no se puede saber qué pasa.",))
+        provenance = result.provenance
+        self.assertEqual((provenance.provider, provenance.model, provenance.prompt_version, provenance.method),
+                         (None, None, None, "silent_audio"))
+        body = analysis_response(result)
+        self.assertEqual(body["schemaVersion"], "evidence-analysis.v1")
+        self.assertEqual(set(body["analysis"]), set(analysis_payload()))
+        self.assertIsNone(body["analysis"]["transcript"])
+
+    async def test_an_isolated_click_is_silence(self):
+        model = FakeModel()
+        click = FakePreparer(sound=SoundLevel(-20.0, -70.0, 0.05))
+        result = await build(self.m4a, model, click).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual((model.calls, result.provenance.method), ([], "silent_audio"))
+
+    async def test_audible_audio_is_analyzed_by_the_model(self):
+        model = FakeModel(evidence_output(transcript="Hay [nombre] herido"))
+        result = await build(self.m4a, model, FakePreparer()).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual((result.provenance.method, result.provenance.prompt_version), ("model", "audio-v2"))
+        self.assertEqual(result.analysis.transcript, "Hay [nombre] herido")
+
+    async def test_failed_measurement_keeps_analyzing(self):
+        model = FakeModel(evidence_output(transcript="Ayuda"))
+        preparer = FakePreparer(sound_error=MediaPreparationError("timeout"))
+        with self.assertLogs("app", level="WARNING"):
+            result = await build(self.m4a, model, preparer).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual((len(model.calls), result.analysis.transcript), (1, "Ayuda"))
+
+    async def test_silent_video_sends_only_frames_and_says_so(self):
+        timeline = [{"startSecond": 0, "text": "Una persona en el suelo"}]
+        model = FakeModel(evidence_output(transcript=None, timeline=timeline))
+        preparer = FakePreparer(PreparedVideo(12.0, PREPARED.frames, None), sound=SILENT)
+        result = await build(self.mp4, model, preparer, FRAMES).execute("job", reference(self.mp4, "video/mp4"))
+        # La pista en silencio ni se extrae: el preparador recibe el video como si no tuviera audio.
+        self.assertEqual(preparer.calls, [("probe", "video/mp4"), ("sound", -50.0), ("prepare", 8, 0.3, False)])
+        call = model.calls[0]
+        self.assertTrue(all(p.modality is Modality.IMAGE for p in call["media"]))
+        self.assertIn("no tiene sonido audible", call["text"])
+        self.assertIn("transcript debe ser null", call["text"])
+        self.assertNotIn("pista de audio completa", call["text"])
+        self.assertEqual((result.provenance.method, result.provenance.prompt_version), ("model", "video-v3"))
+        self.assertIsNone(result.analysis.transcript)
+
+    async def test_transcript_of_a_silent_video_is_dropped(self):
+        for frames in (FRAMES, None):
+            model = FakeModel(evidence_output(transcript="Se cayó de la escalera", timeline=[]))
+            preparer = FakePreparer(PreparedVideo(12.0, PREPARED.frames, None), sound=SILENT)
+            with self.assertLogs("app", level="WARNING") as logs:
+                result = await build(self.mp4, model, preparer, frames).execute("job", reference(self.mp4, "video/mp4"))
+            self.assertIsNone(result.analysis.transcript)
+            self.assertIn("se descartó una transcripción", result.analysis.limitations[-1])
+            self.assertIn("no tiene sonido audible", model.calls[0]["text"])
+            self.assertNotIn("escalera", "".join(logs.output))
+
+    async def test_video_without_audio_track_is_not_measured(self):
+        preparer = FakePreparer(PreparedVideo(12.0, PREPARED.frames, None), info=MediaInfo(12.0, True, False))
+        model = FakeModel(evidence_output(transcript=None, timeline=[]))
+        await build(self.mp4, model, preparer, FRAMES).execute("job", reference(self.mp4, "video/mp4"))
+        self.assertNotIn(("sound", -50.0), preparer.calls)
+        self.assertIn("El video no tiene audio.", model.calls[0]["text"])
+
+    async def test_without_preparer_the_model_is_called(self):
+        model = FakeModel(evidence_output(transcript=""))
+        result = await build(self.m4a, model).execute("job", reference(self.m4a, "audio/mp4"))
+        self.assertEqual(len(model.calls), 1)
+        self.assertIsNone(result.analysis.transcript)  # una cadena vacía es lo mismo que null
+
+
+class SilencePolicyTests(unittest.TestCase):
+    def test_thresholds(self):
+        policy = SilencePolicy()
+        self.assertTrue(policy.is_silent(SoundLevel(-91.0, -91.0, 0.0)))  # silencio digital
+        self.assertTrue(policy.is_silent(SoundLevel(-76.3, -91.0, 0.0)))  # el micrófono apagado del incidente
+        self.assertTrue(policy.is_silent(SoundLevel(-math.inf, None, 0.0)))  # sin muestras
+        self.assertTrue(policy.is_silent(SoundLevel(-10.0, -60.0, 0.29)))  # un golpe aislado
+        self.assertFalse(policy.is_silent(SoundLevel(-49.0, -65.0, 0.3)))
+        self.assertFalse(policy.is_silent(SoundLevel(-12.0, -30.0, 8.0)))
+        self.assertFalse(SilencePolicy(min_audible_seconds=0).is_silent(SoundLevel(-10.0, -60.0, 0.0)))
+
+    def test_invalid_thresholds(self):
+        for kwargs in ({"max_volume_db": 1.0}, {"min_audible_seconds": -1.0}):
+            with self.assertRaises(ValueError):
+                SilencePolicy(**kwargs)
 
 
 def analysis(summary="Choque entre dos autos.", **overrides):
