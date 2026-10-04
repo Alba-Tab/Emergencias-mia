@@ -17,12 +17,15 @@ Hazard = Literal[
     "water", "weapon_or_violence", "crowd", "height", "entrapment", "other",
 ]
 SeverityLevel = Literal["low", "moderate", "high", "undetermined"]
+# Por qué una evidencia no sirve para describir la emergencia. Ante la duda, una evidencia sirve.
+UnusableReason = Literal["no_emergency_content", "too_dark", "too_blurry", "silent", "no_useful_speech"]
 Basis = Literal["observed", "inferred"]
 
 EVENT_TYPES: tuple[str, ...] = get_args(EventType)
 HAZARDS: tuple[str, ...] = get_args(Hazard)
 SEVERITY_LEVELS: tuple[str, ...] = get_args(SeverityLevel)
 BASES: tuple[str, ...] = get_args(Basis)
+UNUSABLE_REASONS: tuple[str, ...] = get_args(UnusableReason)
 
 MAX_ITEMS = 12
 MAX_TEXT = 600
@@ -81,7 +84,11 @@ class TimedObservation:
 
 @dataclass(frozen=True, slots=True)
 class EvidenceAnalysis:
-    """Contenido común a toda modalidad; `transcript` y `timeline` solo aplican a audio/video."""
+    """Contenido común a toda modalidad; `transcript` y `timeline` solo aplican a audio/video.
+
+    `usable` en falso, siempre con su motivo, dice que la evidencia no muestra nada de la emergencia (una foto negra,
+    un audio en silencio): el resumen del incidente no la tiene en cuenta.
+    """
 
     summary: str
     event_type: str
@@ -93,10 +100,15 @@ class EvidenceAnalysis:
     limitations: tuple[str, ...]
     transcript: str | None = None
     timeline: tuple[TimedObservation, ...] = ()
+    usable: bool = True
+    unusable_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.summary.strip():
             raise ValueError("summary es obligatorio")
+        if self.usable != (self.unusable_reason is None) or (
+                self.unusable_reason is not None and self.unusable_reason not in UNUSABLE_REASONS):
+            raise ValueError("una evidencia que no sirve necesita un motivo conocido, y una que sirve no lleva motivo")
         if self.event_type not in EVENT_TYPES:
             raise ValueError("event_type desconocido")
         if any(hazard not in HAZARDS for hazard in self.hazards):
@@ -111,7 +123,7 @@ class Provenance:
     model: str | None
     prompt_version: str | None
     generated_at: datetime
-    method: str  # "model" o "single_evidence"
+    method: str  # "model", "single_evidence", "no_useful_evidence" o "silent_audio"
 
 
 @dataclass(frozen=True, slots=True)

@@ -128,9 +128,19 @@ class SynthesisInput:
             raise AiError("nothing_to_summarize")
 
     @property
+    def useful_evidences(self) -> tuple[EvidenceInput, ...]:
+        """Las evidencias que sirven: una foto negra o un audio en silencio no describen la emergencia."""
+        return tuple(evidence for evidence in self.evidences if evidence.analysis.usable)
+
+    @property
     def is_single_evidence(self) -> bool:
-        """Una sola evidencia y ningún texto de alerta: no hay nada que combinar."""
-        return len(self.evidences) == 1 and not any(alert.has_text for alert in self.alerts)
+        """Una sola evidencia que sirve y ningún texto de alerta: no hay nada que combinar."""
+        return len(self.useful_evidences) == 1 and not any(alert.has_text for alert in self.alerts)
+
+    @property
+    def has_nothing_useful(self) -> bool:
+        """Llegaron evidencias, pero ninguna sirve y ninguna alerta tiene texto: no hay qué resumir todavía."""
+        return not self.useful_evidences and not any(alert.has_text for alert in self.alerts)
 
     def alert_of(self, evidence_id: int) -> int:
         return next(e.alert_id for e in self.evidences if e.evidence_id == evidence_id)
@@ -141,7 +151,7 @@ class SynthesisInput:
         Una alerta sin texto no aporta nada que citar, así que también se descarta.
         """
         cited_evidences, cited_alerts = set(evidence_ids), set(alert_ids)
-        valid_evidences = cited_evidences & {e.evidence_id for e in self.evidences}
+        valid_evidences = cited_evidences & {e.evidence_id for e in self.useful_evidences}
         valid_alerts = cited_alerts & {a.alert_id for a in self.alerts if a.has_text}
         dropped = len(cited_evidences - valid_evidences) + len(cited_alerts - valid_alerts)
         return valid_evidences, valid_alerts, dropped
@@ -149,7 +159,7 @@ class SynthesisInput:
     def reported_hazards(self) -> dict[str, datetime | None]:
         """Cada peligro que mencionó alguna evidencia, con la hora de la mención más reciente que se conoce."""
         latest: dict[str, datetime | None] = {}
-        for evidence in self.evidences:
+        for evidence in self.useful_evidences:
             when = evidence.received_at
             for hazard in evidence.analysis.hazards:
                 current = latest.get(hazard)
@@ -258,8 +268,8 @@ def used_sources(source: SynthesisInput) -> tuple[tuple[int, ...], tuple[int, ..
 
 
 def single_evidence_summary(source: SynthesisInput, generated_at: datetime) -> IncidentSummary:
-    """Traslada el único resultado al formato del resumen sin llamar al modelo."""
-    evidence = source.evidences[0]
+    """Traslada el único resultado que sirve al formato del resumen sin llamar al modelo."""
+    evidence = source.useful_evidences[0]
     analysis = evidence.analysis
     ids = (evidence.evidence_id,)
     used_evidences, used_alerts = used_sources(source)
@@ -278,4 +288,29 @@ def single_evidence_summary(source: SynthesisInput, generated_at: datetime) -> I
         used_evidence_ids=used_evidences,
         used_alert_ids=used_alerts,
         provenance=Provenance(None, None, None, generated_at, "single_evidence"),
+    )
+
+
+NOTHING_USEFUL_METHOD = "no_useful_evidence"
+NOTHING_USEFUL_SUMMARY = "Todavía no hay información útil: lo que se envió no muestra la emergencia."
+
+
+def nothing_useful_summary(source: SynthesisInput, generated_at: datetime) -> IncidentSummary:
+    """Ninguna evidencia sirve y no hay texto de alertas: se dice eso, sin llamar al modelo."""
+    used_evidences, used_alerts = used_sources(source)
+    return IncidentSummary(
+        incident_id=source.incident_id,
+        summary=NOTHING_USEFUL_SUMMARY,
+        key_points=(KeyPoint("what", "Sin información útil todavía."),),
+        event_type="undetermined",
+        people=None,
+        hazard_states=(),
+        findings=(),
+        risks=(),
+        severity=Severity("undetermined", ()),
+        conflicts=(),
+        limitations=("Lo que se envió no muestra la emergencia.",),
+        used_evidence_ids=used_evidences,
+        used_alert_ids=used_alerts,
+        provenance=Provenance(None, None, None, generated_at, NOTHING_USEFUL_METHOD),
     )

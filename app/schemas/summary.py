@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.analysis_result import (
     Basis, EventType, EvidenceAnalysis, Finding, Hazard, PeopleRange, Severity, SeverityLevel, TimedObservation,
+    UnusableReason,
 )
 from app.domain.evidence_reference import Modality
 from app.domain.incident_summary import (
@@ -60,8 +61,12 @@ class AnalysisIn(_In):
     limitations: list[str] = Field(default_factory=list, max_length=20)
     transcript: str | None = Field(default=None, max_length=10000)
     timeline: list[TimedIn] = Field(default_factory=list, max_length=20)
+    # v2: un análisis de v1 no los trae y cuenta como una evidencia que sirve.
+    usable: bool = True
+    unusableReason: UnusableReason | None = None
 
     def to_domain(self) -> EvidenceAnalysis:
+        usable = self.usable or self.unusableReason is None
         return EvidenceAnalysis(
             summary=self.summary,
             event_type=self.eventType,
@@ -73,6 +78,8 @@ class AnalysisIn(_In):
             limitations=tuple(self.limitations),
             transcript=self.transcript,
             timeline=tuple(TimedObservation(t.startSecond, t.text) for t in self.timeline),
+            usable=usable,
+            unusable_reason=None if usable else self.unusableReason,
         )
 
 

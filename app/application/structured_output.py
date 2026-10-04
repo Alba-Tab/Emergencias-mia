@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from app.domain.analysis_result import (
     MAX_ITEMS, MAX_TRANSCRIPT, Basis, EventType, EvidenceAnalysis, Finding, Hazard, PeopleRange,
-    Severity, SeverityLevel, TimedObservation, clip, clip_all,
+    Severity, SeverityLevel, TimedObservation, UnusableReason, clip, clip_all,
 )
 from app.domain.errors import AiError
 from app.domain.incident_summary import KeyPointKind, SynthesisInput
@@ -53,10 +53,14 @@ class EvidenceOutput(_Strict):
     severity: SeverityLevel
     severityBasis: list[str]
     limitations: list[str]
+    usable: bool
+    unusableReason: UnusableReason | None
 
     _summary = field_validator("summary")(_not_blank)
 
     def _common(self, transcript: str | None = None, timeline=()) -> EvidenceAnalysis:
+        # Una evidencia solo deja de servir con un motivo: sin él, ante la duda, sirve.
+        usable = self.usable or self.unusableReason is None
         return EvidenceAnalysis(
             summary=clip(self.summary),
             event_type=self.eventType,
@@ -68,6 +72,8 @@ class EvidenceOutput(_Strict):
             limitations=clip_all(self.limitations),
             transcript=transcript,
             timeline=timeline,
+            usable=usable,
+            unusable_reason=None if usable else self.unusableReason,
         )
 
     def to_domain(self) -> EvidenceAnalysis:

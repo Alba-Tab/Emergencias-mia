@@ -62,11 +62,11 @@ def build_services(config: Settings, client: httpx.AsyncClient) -> Services | No
     profiles = {
         Modality.IMAGE: ModalityProfile(
             MediaPolicy(Modality.IMAGE, IMAGE_MIME_TYPES, config.image_max_bytes),
-            load_prompt("image_v3"), EvidenceOutput, model(config.image_model),
+            load_prompt("image_v4"), EvidenceOutput, model(config.image_model),
         ),
         Modality.AUDIO: ModalityProfile(
             MediaPolicy(Modality.AUDIO, AUDIO_MIME_TYPES, config.audio_max_bytes, config.audio_max_seconds),
-            load_prompt("audio_v3"), AudioOutput, model(config.audio_model),
+            load_prompt("audio_v4"), AudioOutput, model(config.audio_model),
         ),
         Modality.VIDEO: ModalityProfile(
             MediaPolicy(Modality.VIDEO, VIDEO_MIME_TYPES, config.video_max_bytes, config.video_max_seconds),

@@ -15,7 +15,7 @@ from app.application.prompts import Prompt
 from app.application.structured_output import SummaryOutput, json_schema, parse_output
 from app.domain.analysis_result import EvidenceAnalysis, PeopleRange, Provenance, Severity, clip, clip_all
 from app.domain.incident_summary import (
-    IncidentSummary, SynthesisInput, key_points, single_evidence_summary, used_sources,
+    IncidentSummary, SynthesisInput, key_points, nothing_useful_summary, single_evidence_summary, used_sources,
 )
 
 
@@ -60,7 +60,8 @@ def sources_document(source: SynthesisInput) -> str:
                 "receivedAt": _when(evidence.received_at),
                 "analysis": _analysis(evidence.analysis),
             }
-            for evidence in source.evidences
+            # Una evidencia que no sirve no llega al modelo: no tiene nada que aportar y solo podría confundirlo.
+            for evidence in source.useful_evidences
         ],
     }
     # `<` escapado (sigue siendo JSON válido): un texto del ciudadano no puede cerrar la etiqueta y salir de los datos.
@@ -83,6 +84,8 @@ class SynthesizeIncidentSummary:
         self.clock = clock
 
     async def execute(self, source: SynthesisInput) -> IncidentSummary:
+        if source.has_nothing_useful:
+            return nothing_useful_summary(source, self.clock())
         if source.is_single_evidence:
             return single_evidence_summary(source, self.clock())
 

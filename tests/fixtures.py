@@ -51,6 +51,8 @@ def evidence_output(**overrides) -> dict:
         "severity": "moderate",
         "severityBasis": ["Daños frontales visibles en ambos autos."],
         "limitations": ["El interior de los vehículos no es visible."],
+        "usable": True,
+        "unusableReason": None,
     }
     data.update(overrides)
     return data
@@ -69,6 +71,8 @@ def analysis_payload(**overrides) -> dict:
         "limitations": ["Interior no visible."],
         "transcript": None,
         "timeline": [],
+        "usable": True,
+        "unusableReason": None,
     }
     data.update(overrides)
     return data
