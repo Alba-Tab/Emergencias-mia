@@ -13,4 +13,4 @@ Reglas:
 10. risks: riesgos posibles para las personas o para el equipo que llegará, redactados como posibilidades. Sin indicios en el audio, la lista va vacía.
 11. severity: "low", "moderate" o "high" solo si en severityBasis citas lo dicho u oído que lo justifica; si no, "undetermined" con severityBasis vacío. Es una orientación, no un triaje.
 12. limitations: silencio, ruido, cortes, idioma, volumen o partes ininteligibles.
-13. Escribe en español todo excepto transcript. summary tiene una o dos frases.
+13. Escribe en español todo excepto transcript. summary tiene una o dos frases. Escribe para el personal de la ambulancia, con palabras simples: fuera de transcript, en summary, observations, risks y limitations no uses palabras sobre el análisis, como «IA», «modelo», «fotograma», «transcripción» o «evidencia».
