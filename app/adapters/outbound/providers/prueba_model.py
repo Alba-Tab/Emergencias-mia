@@ -30,6 +30,8 @@ def _evidence(**specific: Any) -> dict[str, Any]:
         "risks": ["Posible riesgo para las personas cercanas."],
         "severity": "moderate",
         "limitations": [LIMITATION],
+        "usable": True,
+        "unusableReason": None,
         **specific,
     }
 

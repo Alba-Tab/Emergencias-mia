@@ -268,9 +268,10 @@ class SilenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((provenance.provider, provenance.model, provenance.prompt_version, provenance.method),
                          (None, None, None, "silent_audio"))
         body = analysis_response(result)
-        self.assertEqual(body["schemaVersion"], "evidence-analysis.v1")
+        self.assertEqual(body["schemaVersion"], "evidence-analysis.v2")
         self.assertEqual(set(body["analysis"]), set(analysis_payload()))
         self.assertIsNone(body["analysis"]["transcript"])
+        self.assertEqual((body["analysis"]["usable"], body["analysis"]["unusableReason"]), (False, "silent"))
 
     async def test_an_isolated_click_is_silence(self):
         model = FakeModel()
@@ -548,6 +549,57 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(services.synthesize.prompt.version, "summary-v2")
         self.assertIn("keyPoints", services.synthesize.prompt.text)
         self.assertIn("resolvedHazards", services.synthesize.prompt.text)
+
+    def useless(self):
+        return analysis("Imagen negra.", usable=False, unusable_reason="too_dark", hazards=("smoke",))
+
+    async def test_a_useless_evidence_is_left_out_of_the_shortcut(self):
+        source = SynthesisInput(5, (AlertContext(1, NOW, None, None, None),), (
+            EvidenceInput(10, 1, Modality.IMAGE, NOW, self.useless()),
+            EvidenceInput(11, 1, Modality.AUDIO, LATER, analysis()),
+        ))
+        model = FakeModel()
+        summary = await SynthesizeIncidentSummary(model, load_prompt("summary_v2"), lambda: NOW).execute(source)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(summary.provenance.method, "single_evidence")
+        self.assertEqual(summary.findings[0].evidence_ids, (11,))
+        self.assertEqual(summary.hazards, ("traffic",))
+        # Las fuentes usadas siguen siendo todas las recibidas: la regla de versiones del backend no cambia.
+        self.assertEqual(summary.used_evidence_ids, (10, 11))
+
+    async def test_only_useless_evidences_say_there_is_nothing_useful(self):
+        source = SynthesisInput(5, (AlertContext(1, NOW, None, None, None),),
+                                (EvidenceInput(10, 1, Modality.IMAGE, NOW, self.useless()),))
+        model = FakeModel()
+        summary = await SynthesizeIncidentSummary(model, load_prompt("summary_v2"), lambda: NOW).execute(source)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(summary.provenance.method, "no_useful_evidence")
+        self.assertEqual([(p.kind, p.text) for p in summary.key_points], [("what", "Sin información útil todavía.")])
+        self.assertEqual((summary.event_type, summary.severity.level, summary.hazards), ("undetermined", "undetermined", ()))
+        self.assertEqual(summary.used_evidence_ids, (10,))
+
+    async def test_the_model_never_sees_nor_cites_a_useless_evidence(self):
+        alerts = (AlertContext(1, NOW, None, None, None), AlertContext(2, NOW, "Hay alguien atrapado", 3, False))
+        source = SynthesisInput(5, alerts, (
+            EvidenceInput(10, 1, Modality.IMAGE, NOW, analysis()),
+            EvidenceInput(11, 2, Modality.IMAGE, NOW, self.useless()),
+        ))
+        finding = {"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [10, 11], "alertIds": []}
+        model = FakeModel(summary_output(findings=[finding], hazards=["traffic"]))
+        with self.assertLogs("app", level="WARNING"):
+            summary = await SynthesizeIncidentSummary(model, load_prompt("summary_v2"), lambda: NOW).execute(source)
+        sent = json.loads(model.calls[0]["text"].split("<fuentes>\n", 1)[1].rsplit("\n</fuentes>", 1)[0])
+        self.assertEqual([e["evidenceId"] for e in sent["evidences"]], [10])
+        self.assertEqual(summary.findings[0].evidence_ids, (10,))
+        # El humo solo lo trae la imagen que no sirve: no vuelve como peligro sin confirmar.
+        self.assertEqual(summary.hazards, ("traffic",))
+        self.assertEqual(summary.used_evidence_ids, (10, 11))
+
+    def test_a_useless_evidence_needs_a_reason(self):
+        output = EvidenceOutput.model_validate(evidence_output(usable=False, unusableReason=None))
+        self.assertEqual((output.to_domain().usable, output.to_domain().unusable_reason), (True, None))
+        output = EvidenceOutput.model_validate(evidence_output(usable=False, unusableReason="too_blurry"))
+        self.assertEqual((output.to_domain().usable, output.to_domain().unusable_reason), (False, "too_blurry"))
 
     async def test_rejects_an_unusable_summary(self):
         model = FakeModel(summary_output(summary=" "))

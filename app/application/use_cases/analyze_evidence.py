@@ -79,6 +79,8 @@ def silent_audio_analysis() -> EvidenceAnalysis:
         severity=Severity("undetermined", ()),
         limitations=(SILENT_LIMITATION,),
         transcript=None,
+        usable=False,
+        unusable_reason="silent",
     )
 
 
