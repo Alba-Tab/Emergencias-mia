@@ -16,7 +16,7 @@ from app.domain.analysis_result import (
     Severity, SeverityLevel, TimedObservation, clip, clip_all,
 )
 from app.domain.errors import AiError
-from app.domain.incident_summary import SynthesisInput
+from app.domain.incident_summary import KeyPointKind, SynthesisInput
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +108,14 @@ class SourcedFindingOut(SourcedOut):
     basis: Basis
 
 
+class KeyPointOut(_Strict):
+    kind: KeyPointKind
+    text: str
+
+
 class SummaryOutput(_Strict):
     summary: str = Field(min_length=1)
+    keyPoints: list[KeyPointOut]
     eventType: EventType
     peopleMin: int | None
     peopleMax: int | None

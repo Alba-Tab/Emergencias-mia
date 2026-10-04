@@ -361,6 +361,8 @@ def analysis(summary="Choque entre dos autos.", **overrides):
 def summary_output(**overrides):
     data = {
         "summary": "Choque de dos autos con una persona atrapada.",
+        "keyPoints": [{"kind": "what", "text": "Choque de dos autos."},
+                      {"kind": "critical", "text": "Una persona atrapada."}],
         "eventType": "traffic_accident", "peopleMin": 1, "peopleMax": 3, "hazards": ["traffic"],
         "findings": [{"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [10, 11], "alertIds": [2]}],
         "risks": [{"text": "Tráfico cercano.", "evidenceIds": [10], "alertIds": []}],
@@ -454,6 +456,36 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
             summary = await self.synthesize(findings=[finding], conflicts=[conflict])
         self.assertEqual(summary.findings[0].corroborating_alerts, 2)
         self.assertEqual((summary.conflicts[0].evidence_ids, summary.conflicts[0].corroborating_alerts), ((), 1))
+
+    async def test_key_points_follow_the_kind_order_and_limits(self):
+        points = [
+            {"kind": "critical", "text": "Conductor atrapado, podría estar inconsciente."},
+            {"kind": "what", "text": "Choque de dos autos."},
+            {"kind": "hazard", "text": "Sale humo de un auto."},
+            {"kind": "what", "text": "Otro qué pasó que sobra."},
+            {"kind": "people", "text": "Dos heridos; uno no se mueve."},
+            {"kind": "critical", "text": "   "},
+            {"kind": "critical", "text": "Un quinto punto que no entra."},
+        ]
+        summary = await self.synthesize(keyPoints=points)
+        self.assertEqual([p.kind for p in summary.key_points], ["what", "people", "hazard", "critical"])
+        self.assertEqual(summary.key_points[0].text, "Choque de dos autos.")
+        self.assertEqual(summary.key_points[3].text, "Conductor atrapado, podría estar inconsciente.")
+
+    async def test_long_key_points_are_clipped(self):
+        summary = await self.synthesize(keyPoints=[{"kind": "what", "text": "palabra " * 40}])
+        self.assertLessEqual(len(summary.key_points[0].text), 120)
+        self.assertTrue(summary.key_points[0].text.endswith("…"))
+
+    async def test_without_key_points_the_summary_is_the_what(self):
+        summary = await self.synthesize(keyPoints=[{"kind": "people", "text": " "}])
+        self.assertEqual([(p.kind, p.text) for p in summary.key_points],
+                         [("what", "Choque de dos autos con una persona atrapada.")])
+
+    async def test_single_evidence_key_point_is_its_summary(self):
+        summary = await SynthesizeIncidentSummary(FakeModel(), load_prompt("summary_v1"), lambda: NOW).execute(
+            self.source(with_text=False, evidences=1))
+        self.assertEqual([(p.kind, p.text) for p in summary.key_points], [("what", "Choque entre dos autos.")])
 
     async def test_rejects_an_unusable_summary(self):
         model = FakeModel(summary_output(summary=" "))
