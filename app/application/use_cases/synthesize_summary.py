@@ -14,7 +14,9 @@ from app.application.ports.multimodal_model import MultimodalModel
 from app.application.prompts import Prompt
 from app.application.structured_output import SummaryOutput, json_schema, parse_output
 from app.domain.analysis_result import EvidenceAnalysis, PeopleRange, Provenance, Severity, clip, clip_all
-from app.domain.incident_summary import IncidentSummary, SynthesisInput, single_evidence_summary, used_sources
+from app.domain.incident_summary import (
+    IncidentSummary, SynthesisInput, key_points, single_evidence_summary, used_sources,
+)
 
 
 def _when(value: datetime | None) -> str | None:
@@ -97,6 +99,7 @@ class SynthesizeIncidentSummary:
         return IncidentSummary(
             incident_id=source.incident_id,
             summary=clip(output.summary),
+            key_points=key_points(((p.kind, p.text) for p in output.keyPoints), output.summary),
             event_type=output.eventType,
             people=PeopleRange.of(output.peopleMin, output.peopleMax),
             hazards=tuple(dict.fromkeys(output.hazards)),

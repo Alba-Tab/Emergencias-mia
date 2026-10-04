@@ -20,7 +20,8 @@ from app.domain.incident_summary import (
 )
 from app.schemas.analysis import provenance_json
 
-SUMMARY_SCHEMA_VERSION = "incident-summary.v1"
+# v2 agrega `keyPoints`; los campos de v1 no cambian de forma, así que un cliente de v1 sigue funcionando.
+SUMMARY_SCHEMA_VERSION = "incident-summary.v2"
 
 
 class _In(BaseModel):
@@ -129,6 +130,7 @@ def summary_response(summary: IncidentSummary) -> dict[str, Any]:
         "schemaVersion": SUMMARY_SCHEMA_VERSION,
         "summary": {
             "summary": summary.summary,
+            "keyPoints": [{"kind": p.kind, "text": p.text} for p in summary.key_points],
             "eventType": summary.event_type,
             "people": {"min": summary.people.minimum, "max": summary.people.maximum} if summary.people else None,
             "hazards": list(summary.hazards),

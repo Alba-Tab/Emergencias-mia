@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal, get_args
 
 from app.domain.analysis_result import (
     BASES, EVENT_TYPES, HAZARDS, EvidenceAnalysis, PeopleRange, Provenance, Severity, clip,
@@ -13,6 +15,42 @@ from app.domain.evidence_reference import Modality
 
 MAX_ALERTS = 50
 MAX_EVIDENCES = 50
+
+# Puntos clave para la tripulación: el orden de la lista es el orden en que se muestran y se leen.
+KeyPointKind = Literal["what", "people", "hazard", "critical"]
+KEY_POINT_KINDS: tuple[str, ...] = get_args(KeyPointKind)
+MAX_KEY_POINTS = 4
+# El prompt pide 90 caracteres; el recorte deja margen para no partir una frase casi completa.
+MAX_KEY_POINT_TEXT = 120
+
+
+@dataclass(frozen=True, slots=True)
+class KeyPoint:
+    """Una frase corta, en estilo radio, para leer en pantalla o en voz alta."""
+
+    kind: str
+    text: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in KEY_POINT_KINDS:
+            raise ValueError("kind desconocido")
+        if not self.text.strip():
+            raise ValueError("text es obligatorio")
+
+
+def key_points(items: Iterable[tuple[str, str]], fallback: str) -> tuple[KeyPoint, ...]:
+    """Orden fijo por tipo, un solo `what` y como máximo cuatro.
+
+    Sin ninguna frase utilizable, el resumen general hace de `what`: la tarjeta nunca queda vacía.
+    """
+    kept: list[KeyPoint] = []
+    for kind, text in items:
+        text = clip(text, MAX_KEY_POINT_TEXT)
+        if not text or (kind == "what" and any(point.kind == "what" for point in kept)):
+            continue
+        kept.append(KeyPoint(kind, text))
+    kept.sort(key=lambda point: KEY_POINT_KINDS.index(point.kind))
+    return tuple(kept[:MAX_KEY_POINTS]) or (KeyPoint("what", clip(fallback, MAX_KEY_POINT_TEXT)),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +146,7 @@ class SourcedStatement:
 class IncidentSummary:
     incident_id: int
     summary: str
+    key_points: tuple[KeyPoint, ...]
     event_type: str
     people: PeopleRange | None
     hazards: tuple[str, ...]
@@ -123,6 +162,8 @@ class IncidentSummary:
     def __post_init__(self) -> None:
         if not self.summary.strip():
             raise ValueError("summary es obligatorio")
+        if not self.key_points or len(self.key_points) > MAX_KEY_POINTS:
+            raise ValueError("key_points fuera de rango")
         if self.event_type not in EVENT_TYPES or any(h not in HAZARDS for h in self.hazards):
             raise ValueError("vocabulario desconocido")
 
@@ -143,6 +184,7 @@ def single_evidence_summary(source: SynthesisInput, generated_at: datetime) -> I
     return IncidentSummary(
         incident_id=source.incident_id,
         summary=analysis.summary,
+        key_points=key_points((), analysis.summary),
         event_type=analysis.event_type,
         people=analysis.people,
         hazards=analysis.hazards,
