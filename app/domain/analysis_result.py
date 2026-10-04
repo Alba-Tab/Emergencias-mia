@@ -14,7 +14,7 @@ EventType = Literal[
 ]
 Hazard = Literal[
     "fire", "smoke", "traffic", "electrical", "gas_or_chemical", "structural_instability",
-    "water", "weapon_or_violence", "crowd", "height", "other",
+    "water", "weapon_or_violence", "crowd", "height", "entrapment", "other",
 ]
 SeverityLevel = Literal["low", "moderate", "high", "undetermined"]
 Basis = Literal["observed", "inferred"]

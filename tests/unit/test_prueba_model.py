@@ -55,7 +55,7 @@ class PruebaAnalysisTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_outputs_per_modality(self):
         image = await self.analyze(synthetic_png(), "image/png")
-        self.assertEqual((image.provenance.provider, image.provenance.prompt_version), ("prueba", "image-v2"))
+        self.assertEqual((image.provenance.provider, image.provenance.prompt_version), ("prueba", "image-v3"))
         self.assertIn("smoke", image.analysis.hazards)
         self.assertTrue(image.analysis.observations)
         self.assertIn(LIMITATION, image.analysis.limitations)
