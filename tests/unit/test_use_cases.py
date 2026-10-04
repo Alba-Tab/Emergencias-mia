@@ -537,6 +537,10 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
             self.source(with_text=False, evidences=1))
         self.assertEqual(self.states(summary), [("traffic", "active", NOW)])
 
+    def test_a_trapped_person_is_a_known_hazard(self):
+        output = EvidenceOutput.model_validate(evidence_output(hazards=["entrapment", "smoke"]))
+        self.assertEqual(output.to_domain().hazards, ("entrapment", "smoke"))
+
     async def test_rejects_an_unusable_summary(self):
         model = FakeModel(summary_output(summary=" "))
         with self.assertRaises(AiError) as caught:
