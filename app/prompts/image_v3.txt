@@ -11,6 +11,6 @@ Reglas:
 8. risks: riesgos posibles para las personas o para el equipo que llegará, redactados como posibilidades.
 9. severity: "low", "moderate" o "high" solo si en severityBasis citas las observaciones visibles que lo justifican; si no, "undetermined" con severityBasis vacío. Es una orientación, no un triaje.
 10. limitations: lo que impide un mejor análisis (encuadre, iluminación, resolución, partes de la escena no visibles).
-11. Escribe en español, con frases breves. summary tiene una o dos frases.
+11. Escribe en español, con frases breves. summary tiene una o dos frases. Escribe para el personal de la ambulancia, con palabras simples: en summary, observations, risks y limitations no uses palabras sobre el análisis, como «IA», «modelo», «fotograma», «transcripción» o «evidencia».
 
 Si la imagen no muestra una emergencia o no se puede interpretar, dilo en summary y en limitations, y usa "undetermined".

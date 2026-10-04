@@ -314,7 +314,7 @@ class SilenceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("app", level="WARNING") as logs:
                 result = await build(self.mp4, model, preparer, frames).execute("job", reference(self.mp4, "video/mp4"))
             self.assertIsNone(result.analysis.transcript)
-            self.assertIn("se descartó una transcripción", result.analysis.limitations[-1])
+            self.assertEqual(result.analysis.limitations[-1], "El video no tiene sonido: no se sabe qué se dice.")
             self.assertIn("no tiene sonido audible", model.calls[0]["text"])
             self.assertNotIn("escalera", "".join(logs.output))
 
