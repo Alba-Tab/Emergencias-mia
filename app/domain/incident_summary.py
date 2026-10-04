@@ -53,6 +53,36 @@ def key_points(items: Iterable[tuple[str, str]], fallback: str) -> tuple[KeyPoin
     return tuple(kept[:MAX_KEY_POINTS]) or (KeyPoint("what", clip(fallback, MAX_KEY_POINT_TEXT)),)
 
 
+HazardStatus = Literal["active", "unconfirmed"]
+HAZARD_STATUSES: tuple[str, ...] = get_args(HazardStatus)
+
+
+@dataclass(frozen=True, slots=True)
+class HazardState:
+    """`unconfirmed`: alguna evidencia lo mencionó y ninguna fuente dijo que terminó, pero el modelo lo omitió."""
+
+    hazard: str
+    status: str
+    last_reported_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if self.hazard not in HAZARDS or self.status not in HAZARD_STATUSES:
+            raise ValueError("vocabulario desconocido")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedHazard:
+    """Un peligro que terminó, con las fuentes que lo dicen."""
+
+    hazard: str
+    evidence_ids: tuple[int, ...]
+    alert_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if self.hazard not in HAZARDS:
+            raise ValueError("vocabulario desconocido")
+
+
 @dataclass(frozen=True, slots=True)
 class AlertContext:
     """Datos que escribió el ciudadano: útiles, pero no verificados."""
@@ -105,16 +135,62 @@ class SynthesisInput:
     def alert_of(self, evidence_id: int) -> int:
         return next(e.alert_id for e in self.evidences if e.evidence_id == evidence_id)
 
-    def sourced(self, text: str, basis: str, evidence_ids, alert_ids) -> tuple[SourcedStatement | None, int]:
-        """Conserva solo las citas a fuentes recibidas y calcula la corroboración con ellas.
+    def valid_citations(self, evidence_ids, alert_ids) -> tuple[set[int], set[int], int]:
+        """Las citas a fuentes recibidas y cuántas se descartaron.
 
-        Devuelve la afirmación (o `None` si no le queda ninguna fuente válida) y cuántas citas se
-        descartaron. Una alerta sin texto no aporta nada que citar, así que también se descarta.
+        Una alerta sin texto no aporta nada que citar, así que también se descarta.
         """
         cited_evidences, cited_alerts = set(evidence_ids), set(alert_ids)
         valid_evidences = cited_evidences & {e.evidence_id for e in self.evidences}
         valid_alerts = cited_alerts & {a.alert_id for a in self.alerts if a.has_text}
         dropped = len(cited_evidences - valid_evidences) + len(cited_alerts - valid_alerts)
+        return valid_evidences, valid_alerts, dropped
+
+    def reported_hazards(self) -> dict[str, datetime | None]:
+        """Cada peligro que mencionó alguna evidencia, con la hora de la mención más reciente que se conoce."""
+        latest: dict[str, datetime | None] = {}
+        for evidence in self.evidences:
+            when = evidence.received_at
+            for hazard in evidence.analysis.hazards:
+                current = latest.get(hazard)
+                if hazard not in latest or (when is not None and (current is None or when > current)):
+                    latest[hazard] = when
+        return latest
+
+    def hazard_states(
+        self, active: Iterable[str], resolved: Iterable[tuple[str, Iterable[int], Iterable[int]]],
+    ) -> tuple[tuple[HazardState, ...], tuple[ResolvedHazard, ...]]:
+        """Un peligro que mencionó alguna evidencia no desaparece del resumen sin motivo.
+
+        Sale de la lista solo si el modelo lo da por terminado citando una fuente recibida. Si lo omitió sin
+        eso, vuelve como `unconfirmed` con la hora de su última mención. Si el modelo lo da a la vez por activo
+        y por terminado, queda activo: ante la duda, el peligro se conserva.
+        """
+        reported = self.reported_hazards()
+        active = tuple(dict.fromkeys(active))
+        ended: list[ResolvedHazard] = []
+        for hazard, evidence_ids, alert_ids in resolved:
+            if hazard in active or any(item.hazard == hazard for item in ended):
+                continue
+            evidences, alerts, _ = self.valid_citations(evidence_ids, alert_ids)
+            if evidences or alerts:
+                ended.append(ResolvedHazard(hazard, tuple(sorted(evidences)), tuple(sorted(alerts))))
+        ended_hazards = {item.hazard for item in ended}
+        states = [HazardState(hazard, "active", reported.get(hazard)) for hazard in active]
+        states += [
+            HazardState(hazard, "unconfirmed", when)
+            for hazard, when in reported.items()
+            if hazard not in active and hazard not in ended_hazards
+        ]
+        return tuple(states), tuple(ended)
+
+    def sourced(self, text: str, basis: str, evidence_ids, alert_ids) -> tuple[SourcedStatement | None, int]:
+        """Conserva solo las citas a fuentes recibidas y calcula la corroboración con ellas.
+
+        Devuelve la afirmación (o `None` si no le queda ninguna fuente válida) y cuántas citas se
+        descartaron.
+        """
+        valid_evidences, valid_alerts, dropped = self.valid_citations(evidence_ids, alert_ids)
         if not valid_evidences and not valid_alerts:
             return None, dropped
         alerts = valid_alerts | {self.alert_of(evidence_id) for evidence_id in valid_evidences}
@@ -149,7 +225,7 @@ class IncidentSummary:
     key_points: tuple[KeyPoint, ...]
     event_type: str
     people: PeopleRange | None
-    hazards: tuple[str, ...]
+    hazard_states: tuple[HazardState, ...]
     findings: tuple[SourcedStatement, ...]
     risks: tuple[SourcedStatement, ...]
     severity: Severity
@@ -158,14 +234,20 @@ class IncidentSummary:
     used_evidence_ids: tuple[int, ...]
     used_alert_ids: tuple[int, ...]
     provenance: Provenance
+    resolved_hazards: tuple[ResolvedHazard, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.summary.strip():
             raise ValueError("summary es obligatorio")
         if not self.key_points or len(self.key_points) > MAX_KEY_POINTS:
             raise ValueError("key_points fuera de rango")
-        if self.event_type not in EVENT_TYPES or any(h not in HAZARDS for h in self.hazards):
+        if self.event_type not in EVENT_TYPES:
             raise ValueError("vocabulario desconocido")
+
+    @property
+    def hazards(self) -> tuple[str, ...]:
+        """Los peligros que no terminaron, activos primero: la misma lista de textos que en v1."""
+        return tuple(state.hazard for state in self.hazard_states)
 
 
 def used_sources(source: SynthesisInput) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -187,7 +269,7 @@ def single_evidence_summary(source: SynthesisInput, generated_at: datetime) -> I
         key_points=key_points((), analysis.summary),
         event_type=analysis.event_type,
         people=analysis.people,
-        hazards=analysis.hazards,
+        hazard_states=tuple(HazardState(hazard, "active", evidence.received_at) for hazard in analysis.hazards),
         findings=tuple(SourcedStatement(f.text, f.basis, ids, (), 1) for f in analysis.observations),
         risks=tuple(SourcedStatement(risk, "inferred", ids, (), 1) for risk in analysis.risks),
         severity=analysis.severity,

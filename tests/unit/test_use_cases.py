@@ -1,7 +1,7 @@
 import json
 import math
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
 from app.application.pipelines.media import (
@@ -21,6 +21,7 @@ from app.schemas.analysis import analysis_response
 from tests.fixtures import analysis_payload, evidence_output, synthetic_bmff, synthetic_png
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+LATER = NOW + timedelta(minutes=12)
 
 
 class FakeModel:
@@ -364,6 +365,7 @@ def summary_output(**overrides):
         "keyPoints": [{"kind": "what", "text": "Choque de dos autos."},
                       {"kind": "critical", "text": "Una persona atrapada."}],
         "eventType": "traffic_accident", "peopleMin": 1, "peopleMax": 3, "hazards": ["traffic"],
+        "resolvedHazards": [],
         "findings": [{"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [10, 11], "alertIds": [2]}],
         "risks": [{"text": "Tráfico cercano.", "evidenceIds": [10], "alertIds": []}],
         "severity": "moderate", "severityBasis": ["Persona atrapada según la alerta 2."],
@@ -486,6 +488,54 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
         summary = await SynthesizeIncidentSummary(FakeModel(), load_prompt("summary_v1"), lambda: NOW).execute(
             self.source(with_text=False, evidences=1))
         self.assertEqual([(p.kind, p.text) for p in summary.key_points], [("what", "Choque entre dos autos.")])
+
+    def hazard_source(self):
+        alerts = (AlertContext(1, NOW, None, None, None), AlertContext(2, LATER, "Ya apagaron el fuego", None, False))
+        items = (EvidenceInput(10, 1, Modality.IMAGE, NOW, analysis(hazards=("traffic", "smoke"))),
+                 EvidenceInput(11, 2, Modality.AUDIO, LATER, analysis(hazards=("traffic",))))
+        return SynthesisInput(5, alerts, items)
+
+    async def synthesize_hazards(self, **overrides):
+        model = FakeModel(summary_output(**overrides))
+        return await SynthesizeIncidentSummary(model, load_prompt("summary_v1"), lambda: NOW).execute(
+            self.hazard_source())
+
+    def states(self, summary):
+        return [(s.hazard, s.status, s.last_reported_at) for s in summary.hazard_states]
+
+    async def test_an_omitted_hazard_comes_back_unconfirmed(self):
+        summary = await self.synthesize_hazards(hazards=["traffic"])
+        self.assertEqual(self.states(summary), [("traffic", "active", LATER), ("smoke", "unconfirmed", NOW)])
+        self.assertEqual(summary.hazards, ("traffic", "smoke"))
+        self.assertEqual(summary.resolved_hazards, ())
+
+    async def test_a_hazard_ends_only_with_a_received_source(self):
+        resolved = [{"type": "smoke", "evidenceIds": [], "alertIds": [2]}]
+        summary = await self.synthesize_hazards(hazards=["traffic"], resolvedHazards=resolved)
+        self.assertEqual(self.states(summary), [("traffic", "active", LATER)])
+        self.assertEqual([(r.hazard, r.alert_ids) for r in summary.resolved_hazards], [("smoke", (2,))])
+
+    async def test_a_hazard_ended_without_valid_sources_stays_unconfirmed(self):
+        # La 99 no se recibió y la alerta 1 no tiene texto.
+        resolved = [{"type": "smoke", "evidenceIds": [99], "alertIds": [1]}]
+        summary = await self.synthesize_hazards(hazards=["traffic"], resolvedHazards=resolved)
+        self.assertEqual(self.states(summary), [("traffic", "active", LATER), ("smoke", "unconfirmed", NOW)])
+        self.assertEqual(summary.resolved_hazards, ())
+
+    async def test_active_wins_when_the_model_contradicts_itself(self):
+        resolved = [{"type": "smoke", "evidenceIds": [11], "alertIds": []}]
+        summary = await self.synthesize_hazards(hazards=["smoke", "traffic"], resolvedHazards=resolved)
+        self.assertEqual(self.states(summary), [("smoke", "active", NOW), ("traffic", "active", LATER)])
+        self.assertEqual(summary.resolved_hazards, ())
+
+    async def test_a_hazard_only_from_the_alert_text_is_active_without_time(self):
+        summary = await self.synthesize_hazards(hazards=["fire", "traffic", "smoke"])
+        self.assertEqual(self.states(summary)[0], ("fire", "active", None))
+
+    async def test_single_evidence_hazards_are_active(self):
+        summary = await SynthesizeIncidentSummary(FakeModel(), load_prompt("summary_v1"), lambda: NOW).execute(
+            self.source(with_text=False, evidences=1))
+        self.assertEqual(self.states(summary), [("traffic", "active", NOW)])
 
     async def test_rejects_an_unusable_summary(self):
         model = FakeModel(summary_output(summary=" "))

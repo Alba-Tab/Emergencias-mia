@@ -20,7 +20,8 @@ from app.domain.incident_summary import (
 )
 from app.schemas.analysis import provenance_json
 
-# v2 agrega `keyPoints`; los campos de v1 no cambian de forma, así que un cliente de v1 sigue funcionando.
+# v2 agrega `keyPoints`, `hazardStates` y `resolvedHazards`; los campos de v1 no cambian de forma, así que un
+# cliente de v1 sigue funcionando.
 SUMMARY_SCHEMA_VERSION = "incident-summary.v2"
 
 
@@ -134,6 +135,18 @@ def summary_response(summary: IncidentSummary) -> dict[str, Any]:
             "eventType": summary.event_type,
             "people": {"min": summary.people.minimum, "max": summary.people.maximum} if summary.people else None,
             "hazards": list(summary.hazards),
+            "hazardStates": [
+                {
+                    "type": state.hazard,
+                    "status": state.status,
+                    "lastReportedAt": state.last_reported_at.isoformat() if state.last_reported_at else None,
+                }
+                for state in summary.hazard_states
+            ],
+            "resolvedHazards": [
+                {"type": item.hazard, "evidenceIds": list(item.evidence_ids), "alertIds": list(item.alert_ids)}
+                for item in summary.resolved_hazards
+            ],
             "findings": [_statement(f) for f in summary.findings],
             "risks": [_statement(r, with_basis=False) for r in summary.risks],
             "severity": {"level": summary.severity.level, "basis": list(summary.severity.basis)},

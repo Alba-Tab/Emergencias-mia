@@ -113,6 +113,12 @@ class KeyPointOut(_Strict):
     text: str
 
 
+class ResolvedHazardOut(_Strict):
+    type: Hazard
+    evidenceIds: list[int]
+    alertIds: list[int]
+
+
 class SummaryOutput(_Strict):
     summary: str = Field(min_length=1)
     keyPoints: list[KeyPointOut]
@@ -120,6 +126,7 @@ class SummaryOutput(_Strict):
     peopleMin: int | None
     peopleMax: int | None
     hazards: list[Hazard]
+    resolvedHazards: list[ResolvedHazardOut]
     findings: list[SourcedFindingOut]
     risks: list[SourcedOut]
     severity: SeverityLevel
