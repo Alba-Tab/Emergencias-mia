@@ -77,7 +77,7 @@ Cada decisión responde a tres preguntas:
 - **Por qué.**
   - Que un peligro desaparezca sin que nadie diga que se resolvió es un error peligroso.
   - La regla se calcula a partir de las fuentes, así que el servicio sigue sin estado.
-- **Esquema.** Cambia la forma de `hazards`. El cambio va junto con M4 en `incident-summary.v2`.
+- **Esquema.** `hazards` sigue siendo la lista de textos de v1, para no romper a los clientes que solo conocen v1. El estado de cada peligro va en `hazardStates` y los terminados, en `resolvedHazards`. El cambio va junto con M4 en `incident-summary.v2`.
 
 ## M4. Campo `keyPoints`
 
