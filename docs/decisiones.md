@@ -24,7 +24,7 @@ Cada decisión responde a tres preguntas:
 | M3 | Un peligro no desaparece sin motivo | Decidida | 2026-10-04 |
 | M4 | Campo `keyPoints` para el paramédico: frases cortas, estilo radio | Decidida | 2026-10-04 |
 | M5 | "Persona atrapada" en la lista de peligros | Propuesta | 2026-10-04 |
-| M6 | Indicar si una evidencia sirve | Propuesta | 2026-10-04 |
+| M6 | Indicar si una evidencia sirve | Decidida | 2026-10-04 |
 | M7 | La gravedad se mantiene, con motivo obligatorio | Decidida | 2026-10-02 |
 | M8 | El análisis de video se conserva, pero no se usa | Decidida | 2026-10-04 |
 | M9 | Privacidad con el proveedor: limitar, informar o ambas | Abierta | — |
@@ -120,7 +120,7 @@ Cada decisión responde a tres preguntas:
 
 ## M6. Indicar si una evidencia sirve
 
-**Propuesta, 2026-10-04.**
+**Decidida e implementada en mia, 2026-10-04.** Además, el resumen no tiene en cuenta las evidencias que no sirven: no llegan al modelo, no se pueden citar y sus peligros no cuentan. Si ninguna sirve y no hay texto de alertas, el resumen dice que todavía no hay información útil. El rechazo en el backend (B5) espera la decisión sobre el estado.
 
 - **Propuesta.** El análisis de cada evidencia agrega dos campos:
   - `usable`: sí o no.
