@@ -95,6 +95,9 @@ class SynthesizeIncidentSummary:
         )
         output = parse_output(SummaryOutput, reply.content)
         findings, risks, conflicts = output.statements(source)
+        hazard_states, resolved_hazards = source.hazard_states(
+            output.hazards, ((r.type, r.evidenceIds, r.alertIds) for r in output.resolvedHazards),
+        )
         used_evidences, used_alerts = used_sources(source)
         return IncidentSummary(
             incident_id=source.incident_id,
@@ -102,7 +105,8 @@ class SynthesizeIncidentSummary:
             key_points=key_points(((p.kind, p.text) for p in output.keyPoints), output.summary),
             event_type=output.eventType,
             people=PeopleRange.of(output.peopleMin, output.peopleMax),
-            hazards=tuple(dict.fromkeys(output.hazards)),
+            hazard_states=hazard_states,
+            resolved_hazards=resolved_hazards,
             findings=findings,
             risks=risks,
             severity=Severity.assess(output.severity, output.severityBasis),

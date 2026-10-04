@@ -153,6 +153,7 @@ def _summary(text: str) -> dict[str, Any]:
         "peopleMin": minimum,
         "peopleMax": maximum,
         "hazards": hazards,
+        "resolvedHazards": [],
         "findings": findings,
         "risks": risks,
         "severity": severity,
