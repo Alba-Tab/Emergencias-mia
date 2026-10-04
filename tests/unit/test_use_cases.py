@@ -541,6 +541,14 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
         output = EvidenceOutput.model_validate(evidence_output(hazards=["entrapment", "smoke"]))
         self.assertEqual(output.to_domain().hazards, ("entrapment", "smoke"))
 
+    async def test_services_use_the_summary_prompt_for_the_crew(self):
+        from app.core.composition import build_services
+        from app.core.config import Settings
+        services = build_services(Settings(_env_file=None, provider="prueba"), None)
+        self.assertEqual(services.synthesize.prompt.version, "summary-v2")
+        self.assertIn("keyPoints", services.synthesize.prompt.text)
+        self.assertIn("resolvedHazards", services.synthesize.prompt.text)
+
     async def test_rejects_an_unusable_summary(self):
         model = FakeModel(summary_output(summary=" "))
         with self.assertRaises(AiError) as caught:

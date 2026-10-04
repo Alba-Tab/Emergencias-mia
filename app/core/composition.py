@@ -81,5 +81,5 @@ def build_services(config: Settings, client: httpx.AsyncClient) -> Services | No
             reader, profiles, preparer=build_preparer(config),
             silence=SilencePolicy(config.silence_max_volume_db, config.silence_min_audible_seconds),
         ),
-        synthesize=SynthesizeIncidentSummary(model(config.summary_model), load_prompt("summary_v1")),
+        synthesize=SynthesizeIncidentSummary(model(config.summary_model), load_prompt("summary_v2")),
     )
