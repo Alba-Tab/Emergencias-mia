@@ -30,6 +30,8 @@ def _evidence(**specific: Any) -> dict[str, Any]:
         "risks": ["Posible riesgo para las personas cercanas."],
         "severity": "moderate",
         "limitations": [LIMITATION],
+        "usable": True,
+        "unusableReason": None,
         **specific,
     }
 
@@ -141,12 +143,19 @@ def _summary(text: str) -> dict[str, Any]:
         severity, severity_basis = "undetermined", []
 
     hazards = sorted({hazard for e in evidences for hazard in e["analysis"].get("hazards") or []})
+    key_points = [{"kind": "what", "text": "Emergencia de prueba."}]
+    if maximum is not None:
+        key_points.append({"kind": "people", "text": f"Hasta {maximum} personas."})
+    if hazards:
+        key_points.append({"kind": "hazard", "text": f"Peligro de prueba: {hazards[0]}."})
     return {
         "summary": f"Resumen de prueba con {len(evidences)} evidencias y {len(alerts)} alertas con texto.",
+        "keyPoints": key_points,
         "eventType": event_type,
         "peopleMin": minimum,
         "peopleMax": maximum,
         "hazards": hazards,
+        "resolvedHazards": [],
         "findings": findings,
         "risks": risks,
         "severity": severity,

@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.analysis_result import (
     Basis, EventType, EvidenceAnalysis, Finding, Hazard, PeopleRange, Severity, SeverityLevel, TimedObservation,
+    UnusableReason,
 )
 from app.domain.evidence_reference import Modality
 from app.domain.incident_summary import (
@@ -20,7 +21,9 @@ from app.domain.incident_summary import (
 )
 from app.schemas.analysis import provenance_json
 
-SUMMARY_SCHEMA_VERSION = "incident-summary.v1"
+# v2 agrega `keyPoints`, `hazardStates` y `resolvedHazards`; los campos de v1 no cambian de forma, así que un
+# cliente de v1 sigue funcionando.
+SUMMARY_SCHEMA_VERSION = "incident-summary.v2"
 
 
 class _In(BaseModel):
@@ -58,8 +61,12 @@ class AnalysisIn(_In):
     limitations: list[str] = Field(default_factory=list, max_length=20)
     transcript: str | None = Field(default=None, max_length=10000)
     timeline: list[TimedIn] = Field(default_factory=list, max_length=20)
+    # v2: un análisis de v1 no los trae y cuenta como una evidencia que sirve.
+    usable: bool = True
+    unusableReason: UnusableReason | None = None
 
     def to_domain(self) -> EvidenceAnalysis:
+        usable = self.usable or self.unusableReason is None
         return EvidenceAnalysis(
             summary=self.summary,
             event_type=self.eventType,
@@ -71,6 +78,8 @@ class AnalysisIn(_In):
             limitations=tuple(self.limitations),
             transcript=self.transcript,
             timeline=tuple(TimedObservation(t.startSecond, t.text) for t in self.timeline),
+            usable=usable,
+            unusable_reason=None if usable else self.unusableReason,
         )
 
 
@@ -129,9 +138,22 @@ def summary_response(summary: IncidentSummary) -> dict[str, Any]:
         "schemaVersion": SUMMARY_SCHEMA_VERSION,
         "summary": {
             "summary": summary.summary,
+            "keyPoints": [{"kind": p.kind, "text": p.text} for p in summary.key_points],
             "eventType": summary.event_type,
             "people": {"min": summary.people.minimum, "max": summary.people.maximum} if summary.people else None,
             "hazards": list(summary.hazards),
+            "hazardStates": [
+                {
+                    "type": state.hazard,
+                    "status": state.status,
+                    "lastReportedAt": state.last_reported_at.isoformat() if state.last_reported_at else None,
+                }
+                for state in summary.hazard_states
+            ],
+            "resolvedHazards": [
+                {"type": item.hazard, "evidenceIds": list(item.evidence_ids), "alertIds": list(item.alert_ids)}
+                for item in summary.resolved_hazards
+            ],
             "findings": [_statement(f) for f in summary.findings],
             "risks": [_statement(r, with_basis=False) for r in summary.risks],
             "severity": {"level": summary.severity.level, "basis": list(summary.severity.basis)},

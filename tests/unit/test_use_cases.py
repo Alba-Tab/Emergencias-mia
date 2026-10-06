@@ -1,7 +1,7 @@
 import json
 import math
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
 from app.application.pipelines.media import (
@@ -21,6 +21,7 @@ from app.schemas.analysis import analysis_response
 from tests.fixtures import analysis_payload, evidence_output, synthetic_bmff, synthetic_png
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+LATER = NOW + timedelta(minutes=12)
 
 
 class FakeModel:
@@ -267,9 +268,10 @@ class SilenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((provenance.provider, provenance.model, provenance.prompt_version, provenance.method),
                          (None, None, None, "silent_audio"))
         body = analysis_response(result)
-        self.assertEqual(body["schemaVersion"], "evidence-analysis.v1")
+        self.assertEqual(body["schemaVersion"], "evidence-analysis.v2")
         self.assertEqual(set(body["analysis"]), set(analysis_payload()))
         self.assertIsNone(body["analysis"]["transcript"])
+        self.assertEqual((body["analysis"]["usable"], body["analysis"]["unusableReason"]), (False, "silent"))
 
     async def test_an_isolated_click_is_silence(self):
         model = FakeModel()
@@ -313,7 +315,7 @@ class SilenceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("app", level="WARNING") as logs:
                 result = await build(self.mp4, model, preparer, frames).execute("job", reference(self.mp4, "video/mp4"))
             self.assertIsNone(result.analysis.transcript)
-            self.assertIn("se descartó una transcripción", result.analysis.limitations[-1])
+            self.assertEqual(result.analysis.limitations[-1], "El video no tiene sonido: no se sabe qué se dice.")
             self.assertIn("no tiene sonido audible", model.calls[0]["text"])
             self.assertNotIn("escalera", "".join(logs.output))
 
@@ -361,7 +363,10 @@ def analysis(summary="Choque entre dos autos.", **overrides):
 def summary_output(**overrides):
     data = {
         "summary": "Choque de dos autos con una persona atrapada.",
+        "keyPoints": [{"kind": "what", "text": "Choque de dos autos."},
+                      {"kind": "critical", "text": "Una persona atrapada."}],
         "eventType": "traffic_accident", "peopleMin": 1, "peopleMax": 3, "hazards": ["traffic"],
+        "resolvedHazards": [],
         "findings": [{"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [10, 11], "alertIds": [2]}],
         "risks": [{"text": "Tráfico cercano.", "evidenceIds": [10], "alertIds": []}],
         "severity": "moderate", "severityBasis": ["Persona atrapada según la alerta 2."],
@@ -454,6 +459,147 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
             summary = await self.synthesize(findings=[finding], conflicts=[conflict])
         self.assertEqual(summary.findings[0].corroborating_alerts, 2)
         self.assertEqual((summary.conflicts[0].evidence_ids, summary.conflicts[0].corroborating_alerts), ((), 1))
+
+    async def test_key_points_follow_the_kind_order_and_limits(self):
+        points = [
+            {"kind": "critical", "text": "Conductor atrapado, podría estar inconsciente."},
+            {"kind": "what", "text": "Choque de dos autos."},
+            {"kind": "hazard", "text": "Sale humo de un auto."},
+            {"kind": "what", "text": "Otro qué pasó que sobra."},
+            {"kind": "people", "text": "Dos heridos; uno no se mueve."},
+            {"kind": "critical", "text": "   "},
+            {"kind": "critical", "text": "Un quinto punto que no entra."},
+        ]
+        summary = await self.synthesize(keyPoints=points)
+        self.assertEqual([p.kind for p in summary.key_points], ["what", "people", "hazard", "critical"])
+        self.assertEqual(summary.key_points[0].text, "Choque de dos autos.")
+        self.assertEqual(summary.key_points[3].text, "Conductor atrapado, podría estar inconsciente.")
+
+    async def test_long_key_points_are_clipped(self):
+        summary = await self.synthesize(keyPoints=[{"kind": "what", "text": "palabra " * 40}])
+        self.assertLessEqual(len(summary.key_points[0].text), 120)
+        self.assertTrue(summary.key_points[0].text.endswith("…"))
+
+    async def test_without_key_points_the_summary_is_the_what(self):
+        summary = await self.synthesize(keyPoints=[{"kind": "people", "text": " "}])
+        self.assertEqual([(p.kind, p.text) for p in summary.key_points],
+                         [("what", "Choque de dos autos con una persona atrapada.")])
+
+    async def test_single_evidence_key_point_is_its_summary(self):
+        summary = await SynthesizeIncidentSummary(FakeModel(), load_prompt("summary_v1"), lambda: NOW).execute(
+            self.source(with_text=False, evidences=1))
+        self.assertEqual([(p.kind, p.text) for p in summary.key_points], [("what", "Choque entre dos autos.")])
+
+    def hazard_source(self):
+        alerts = (AlertContext(1, NOW, None, None, None), AlertContext(2, LATER, "Ya apagaron el fuego", None, False))
+        items = (EvidenceInput(10, 1, Modality.IMAGE, NOW, analysis(hazards=("traffic", "smoke"))),
+                 EvidenceInput(11, 2, Modality.AUDIO, LATER, analysis(hazards=("traffic",))))
+        return SynthesisInput(5, alerts, items)
+
+    async def synthesize_hazards(self, **overrides):
+        model = FakeModel(summary_output(**overrides))
+        return await SynthesizeIncidentSummary(model, load_prompt("summary_v1"), lambda: NOW).execute(
+            self.hazard_source())
+
+    def states(self, summary):
+        return [(s.hazard, s.status, s.last_reported_at) for s in summary.hazard_states]
+
+    async def test_an_omitted_hazard_comes_back_unconfirmed(self):
+        summary = await self.synthesize_hazards(hazards=["traffic"])
+        self.assertEqual(self.states(summary), [("traffic", "active", LATER), ("smoke", "unconfirmed", NOW)])
+        self.assertEqual(summary.hazards, ("traffic", "smoke"))
+        self.assertEqual(summary.resolved_hazards, ())
+
+    async def test_a_hazard_ends_only_with_a_received_source(self):
+        resolved = [{"type": "smoke", "evidenceIds": [], "alertIds": [2]}]
+        summary = await self.synthesize_hazards(hazards=["traffic"], resolvedHazards=resolved)
+        self.assertEqual(self.states(summary), [("traffic", "active", LATER)])
+        self.assertEqual([(r.hazard, r.alert_ids) for r in summary.resolved_hazards], [("smoke", (2,))])
+
+    async def test_a_hazard_ended_without_valid_sources_stays_unconfirmed(self):
+        # La 99 no se recibió y la alerta 1 no tiene texto.
+        resolved = [{"type": "smoke", "evidenceIds": [99], "alertIds": [1]}]
+        summary = await self.synthesize_hazards(hazards=["traffic"], resolvedHazards=resolved)
+        self.assertEqual(self.states(summary), [("traffic", "active", LATER), ("smoke", "unconfirmed", NOW)])
+        self.assertEqual(summary.resolved_hazards, ())
+
+    async def test_active_wins_when_the_model_contradicts_itself(self):
+        resolved = [{"type": "smoke", "evidenceIds": [11], "alertIds": []}]
+        summary = await self.synthesize_hazards(hazards=["smoke", "traffic"], resolvedHazards=resolved)
+        self.assertEqual(self.states(summary), [("smoke", "active", NOW), ("traffic", "active", LATER)])
+        self.assertEqual(summary.resolved_hazards, ())
+
+    async def test_a_hazard_only_from_the_alert_text_is_active_without_time(self):
+        summary = await self.synthesize_hazards(hazards=["fire", "traffic", "smoke"])
+        self.assertEqual(self.states(summary)[0], ("fire", "active", None))
+
+    async def test_single_evidence_hazards_are_active(self):
+        summary = await SynthesizeIncidentSummary(FakeModel(), load_prompt("summary_v1"), lambda: NOW).execute(
+            self.source(with_text=False, evidences=1))
+        self.assertEqual(self.states(summary), [("traffic", "active", NOW)])
+
+    def test_a_trapped_person_is_a_known_hazard(self):
+        output = EvidenceOutput.model_validate(evidence_output(hazards=["entrapment", "smoke"]))
+        self.assertEqual(output.to_domain().hazards, ("entrapment", "smoke"))
+
+    async def test_services_use_the_summary_prompt_for_the_crew(self):
+        from app.core.composition import build_services
+        from app.core.config import Settings
+        services = build_services(Settings(_env_file=None, provider="prueba"), None)
+        self.assertEqual(services.synthesize.prompt.version, "summary-v2")
+        self.assertIn("keyPoints", services.synthesize.prompt.text)
+        self.assertIn("resolvedHazards", services.synthesize.prompt.text)
+
+    def useless(self):
+        return analysis("Imagen negra.", usable=False, unusable_reason="too_dark", hazards=("smoke",))
+
+    async def test_a_useless_evidence_is_left_out_of_the_shortcut(self):
+        source = SynthesisInput(5, (AlertContext(1, NOW, None, None, None),), (
+            EvidenceInput(10, 1, Modality.IMAGE, NOW, self.useless()),
+            EvidenceInput(11, 1, Modality.AUDIO, LATER, analysis()),
+        ))
+        model = FakeModel()
+        summary = await SynthesizeIncidentSummary(model, load_prompt("summary_v2"), lambda: NOW).execute(source)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(summary.provenance.method, "single_evidence")
+        self.assertEqual(summary.findings[0].evidence_ids, (11,))
+        self.assertEqual(summary.hazards, ("traffic",))
+        # Las fuentes usadas siguen siendo todas las recibidas: la regla de versiones del backend no cambia.
+        self.assertEqual(summary.used_evidence_ids, (10, 11))
+
+    async def test_only_useless_evidences_say_there_is_nothing_useful(self):
+        source = SynthesisInput(5, (AlertContext(1, NOW, None, None, None),),
+                                (EvidenceInput(10, 1, Modality.IMAGE, NOW, self.useless()),))
+        model = FakeModel()
+        summary = await SynthesizeIncidentSummary(model, load_prompt("summary_v2"), lambda: NOW).execute(source)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(summary.provenance.method, "no_useful_evidence")
+        self.assertEqual([(p.kind, p.text) for p in summary.key_points], [("what", "Sin información útil todavía.")])
+        self.assertEqual((summary.event_type, summary.severity.level, summary.hazards), ("undetermined", "undetermined", ()))
+        self.assertEqual(summary.used_evidence_ids, (10,))
+
+    async def test_the_model_never_sees_nor_cites_a_useless_evidence(self):
+        alerts = (AlertContext(1, NOW, None, None, None), AlertContext(2, NOW, "Hay alguien atrapado", 3, False))
+        source = SynthesisInput(5, alerts, (
+            EvidenceInput(10, 1, Modality.IMAGE, NOW, analysis()),
+            EvidenceInput(11, 2, Modality.IMAGE, NOW, self.useless()),
+        ))
+        finding = {"text": "Dos autos dañados.", "basis": "observed", "evidenceIds": [10, 11], "alertIds": []}
+        model = FakeModel(summary_output(findings=[finding], hazards=["traffic"]))
+        with self.assertLogs("app", level="WARNING"):
+            summary = await SynthesizeIncidentSummary(model, load_prompt("summary_v2"), lambda: NOW).execute(source)
+        sent = json.loads(model.calls[0]["text"].split("<fuentes>\n", 1)[1].rsplit("\n</fuentes>", 1)[0])
+        self.assertEqual([e["evidenceId"] for e in sent["evidences"]], [10])
+        self.assertEqual(summary.findings[0].evidence_ids, (10,))
+        # El humo solo lo trae la imagen que no sirve: no vuelve como peligro sin confirmar.
+        self.assertEqual(summary.hazards, ("traffic",))
+        self.assertEqual(summary.used_evidence_ids, (10, 11))
+
+    def test_a_useless_evidence_needs_a_reason(self):
+        output = EvidenceOutput.model_validate(evidence_output(usable=False, unusableReason=None))
+        self.assertEqual((output.to_domain().usable, output.to_domain().unusable_reason), (True, None))
+        output = EvidenceOutput.model_validate(evidence_output(usable=False, unusableReason="too_blurry"))
+        self.assertEqual((output.to_domain().usable, output.to_domain().unusable_reason), (False, "too_blurry"))
 
     async def test_rejects_an_unusable_summary(self):
         model = FakeModel(summary_output(summary=" "))

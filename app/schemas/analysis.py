@@ -11,7 +11,8 @@ from app.core.net import valid_download_url
 from app.domain.analysis_result import AnalysisResult, EvidenceAnalysis, Provenance
 from app.domain.evidence_reference import EvidenceReference
 
-EVIDENCE_SCHEMA_VERSION = "evidence-analysis.v1"
+# v2 agrega `usable` y `unusableReason`; los campos de v1 no cambian.
+EVIDENCE_SCHEMA_VERSION = "evidence-analysis.v2"
 
 
 class AnalysisRequest(BaseModel):
@@ -66,6 +67,8 @@ def analysis_json(analysis: EvidenceAnalysis) -> dict[str, Any]:
         "limitations": list(analysis.limitations),
         "transcript": analysis.transcript,
         "timeline": [{"startSecond": t.start_second, "text": t.text} for t in analysis.timeline],
+        "usable": analysis.usable,
+        "unusableReason": analysis.unusable_reason,
     }
 
 

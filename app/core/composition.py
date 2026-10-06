@@ -62,11 +62,11 @@ def build_services(config: Settings, client: httpx.AsyncClient) -> Services | No
     profiles = {
         Modality.IMAGE: ModalityProfile(
             MediaPolicy(Modality.IMAGE, IMAGE_MIME_TYPES, config.image_max_bytes),
-            load_prompt("image_v2"), EvidenceOutput, model(config.image_model),
+            load_prompt("image_v4"), EvidenceOutput, model(config.image_model),
         ),
         Modality.AUDIO: ModalityProfile(
             MediaPolicy(Modality.AUDIO, AUDIO_MIME_TYPES, config.audio_max_bytes, config.audio_max_seconds),
-            load_prompt("audio_v2"), AudioOutput, model(config.audio_model),
+            load_prompt("audio_v4"), AudioOutput, model(config.audio_model),
         ),
         Modality.VIDEO: ModalityProfile(
             MediaPolicy(Modality.VIDEO, VIDEO_MIME_TYPES, config.video_max_bytes, config.video_max_seconds),
@@ -81,5 +81,5 @@ def build_services(config: Settings, client: httpx.AsyncClient) -> Services | No
             reader, profiles, preparer=build_preparer(config),
             silence=SilencePolicy(config.silence_max_volume_db, config.silence_min_audible_seconds),
         ),
-        synthesize=SynthesizeIncidentSummary(model(config.summary_model), load_prompt("summary_v1")),
+        synthesize=SynthesizeIncidentSummary(model(config.summary_model), load_prompt("summary_v2")),
     )

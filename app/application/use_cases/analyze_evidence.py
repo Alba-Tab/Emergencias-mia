@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _LABELS = {Modality.IMAGE: "una imagen", Modality.AUDIO: "un audio grabado", Modality.VIDEO: "un video"}
 SILENT_METHOD = "silent_audio"  # resultado armado sin modelo porque el audio está en silencio
 SILENT_LIMITATION = "El audio está en silencio o casi en silencio: no se puede saber qué pasa."
-DROPPED_TRANSCRIPT = "El audio no tiene sonido audible: se descartó una transcripción que no puede provenir de él."
+DROPPED_TRANSCRIPT = "El video no tiene sonido: no se sabe qué se dice."
 NO_SOUND = ("El video no tiene sonido audible (se midió antes de enviarlo): transcript debe ser null "
             "y no hay observaciones de lo que se oye.")
 
@@ -79,6 +79,8 @@ def silent_audio_analysis() -> EvidenceAnalysis:
         severity=Severity("undetermined", ()),
         limitations=(SILENT_LIMITATION,),
         transcript=None,
+        usable=False,
+        unusable_reason="silent",
     )
 
 

@@ -87,7 +87,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual((body["evidenceId"], body["modality"], body["schemaVersion"]),
-                         (1, "image", "evidence-analysis.v1"))
+                         (1, "image", "evidence-analysis.v2"))
         self.assertEqual(body["analysis"]["severity"]["level"], "moderate")
         self.assertEqual(body["provenance"]["promptVersion"], "image-v2")
         self.assertEqual(self.analyze.seen[0][1].mime_type, "image/png")
@@ -112,10 +112,20 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.post("/v1/summaries", payload)
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["schemaVersion"], "incident-summary.v1")
+        self.assertEqual(body["schemaVersion"], "incident-summary.v2")
+        self.assertEqual(body["summary"]["keyPoints"], [{"kind": "what", "text": "Choque entre dos autos."}])
+        self.assertEqual(body["summary"]["hazards"], ["traffic"])
+        self.assertEqual(body["summary"]["hazardStates"], [{"type": "traffic", "status": "active", "lastReportedAt": None}])
+        self.assertEqual(body["summary"]["resolvedHazards"], [])
         self.assertEqual(body["usedEvidenceIds"], [1])
         self.assertEqual(body["provenance"]["method"], "single_evidence")
         self.assertEqual(body["summary"]["findings"][0]["corroboratingAlerts"], 1)
+
+    def test_summary_accepts_v1_and_v2_analyses(self):
+        v1 = {k: v for k, v in analysis_payload().items() if k not in ("usable", "unusableReason")}
+        self.assertTrue(AnalysisIn.model_validate(v1).to_domain().usable)
+        v2 = AnalysisIn.model_validate(analysis_payload(usable=False, unusableReason="silent")).to_domain()
+        self.assertEqual((v2.usable, v2.unusable_reason), (False, "silent"))
 
     async def test_summary_input_errors(self):
         unknown_alert = {"incidentId": 3, "alerts": [{"alertId": 2}],

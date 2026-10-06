@@ -14,7 +14,9 @@ from app.application.ports.multimodal_model import MultimodalModel
 from app.application.prompts import Prompt
 from app.application.structured_output import SummaryOutput, json_schema, parse_output
 from app.domain.analysis_result import EvidenceAnalysis, PeopleRange, Provenance, Severity, clip, clip_all
-from app.domain.incident_summary import IncidentSummary, SynthesisInput, single_evidence_summary, used_sources
+from app.domain.incident_summary import (
+    IncidentSummary, SynthesisInput, key_points, nothing_useful_summary, single_evidence_summary, used_sources,
+)
 
 
 def _when(value: datetime | None) -> str | None:
@@ -58,7 +60,8 @@ def sources_document(source: SynthesisInput) -> str:
                 "receivedAt": _when(evidence.received_at),
                 "analysis": _analysis(evidence.analysis),
             }
-            for evidence in source.evidences
+            # Una evidencia que no sirve no llega al modelo: no tiene nada que aportar y solo podría confundirlo.
+            for evidence in source.useful_evidences
         ],
     }
     # `<` escapado (sigue siendo JSON válido): un texto del ciudadano no puede cerrar la etiqueta y salir de los datos.
@@ -81,6 +84,8 @@ class SynthesizeIncidentSummary:
         self.clock = clock
 
     async def execute(self, source: SynthesisInput) -> IncidentSummary:
+        if source.has_nothing_useful:
+            return nothing_useful_summary(source, self.clock())
         if source.is_single_evidence:
             return single_evidence_summary(source, self.clock())
 
@@ -93,13 +98,18 @@ class SynthesizeIncidentSummary:
         )
         output = parse_output(SummaryOutput, reply.content)
         findings, risks, conflicts = output.statements(source)
+        hazard_states, resolved_hazards = source.hazard_states(
+            output.hazards, ((r.type, r.evidenceIds, r.alertIds) for r in output.resolvedHazards),
+        )
         used_evidences, used_alerts = used_sources(source)
         return IncidentSummary(
             incident_id=source.incident_id,
             summary=clip(output.summary),
+            key_points=key_points(((p.kind, p.text) for p in output.keyPoints), output.summary),
             event_type=output.eventType,
             people=PeopleRange.of(output.peopleMin, output.peopleMax),
-            hazards=tuple(dict.fromkeys(output.hazards)),
+            hazard_states=hazard_states,
+            resolved_hazards=resolved_hazards,
             findings=findings,
             risks=risks,
             severity=Severity.assess(output.severity, output.severityBasis),

@@ -8,10 +8,10 @@ El análisis es apoyo informativo para el personal. No es un diagnóstico, no es
 
 | Capa | Contenido |
 |---|---|
-| `domain/` | Resultado de evidencia, resumen de incidente, vocabularios cerrados (`eventType`, `hazards`, `severity`) y reglas: una gravedad sin justificación pasa a `undetermined`; un rango de personas incoherente pasa a desconocido; en el resumen se descartan las citas a fuentes no recibidas y las afirmaciones que se quedan sin ninguna fuente válida. |
+| `domain/` | Resultado de evidencia, resumen de incidente, vocabularios cerrados (`eventType`, `hazards`, `severity`) y reglas: una gravedad sin justificación pasa a `undetermined`; un rango de personas incoherente pasa a desconocido; en el resumen se descartan las citas a fuentes no recibidas y las afirmaciones que se quedan sin ninguna fuente válida, los puntos clave se ordenan y se limitan a cuatro, y un peligro que una evidencia mencionó no desaparece sin una fuente que diga que terminó. |
 | `application/` | `AnalyzeEvidence` (una evidencia), `SynthesizeIncidentSummary` (todas las del incidente), límites por modalidad (`pipelines/media.py`), esquemas de salida estructurada y los puertos `EvidenceReader`, `MultimodalModel` y `MediaPreparer`. No importa FastAPI ni clientes de proveedores. |
 | `adapters/` | HTTP de entrada, descarga con URL temporal, `OpenRouterModel` (el adaptador de proveedor para las tres modalidades y la síntesis), `PruebaModel` (el analizador de prueba) y `FfmpegPreparer` (`media/ffmpeg_preparer.py`), que mide la duración real con ffprobe, mide el volumen del audio y reduce el video a fotogramas y audio con ffmpeg. |
-| `prompts/` | Un archivo por prompt; el nombre del archivo es la versión que se registra en cada resultado (`image-v2`, `audio-v2`, `video-v3` para fotogramas, `video-v4` para el video completo, `summary-v1`). Los archivos de versiones anteriores quedan como historial y ya no se cargan. |
+| `prompts/` | Un archivo por prompt; el nombre del archivo es la versión que se registra en cada resultado (`image-v4`, `audio-v4`, `video-v3` para fotogramas, `video-v4` para el video completo, `summary-v2`). Los archivos de versiones anteriores quedan como historial y ya no se cargan. |
 
 Imagen, audio y video comparten el caso de uso. Cada modalidad solo define sus límites, su prompt, su esquema y, opcionalmente, su modelo (`ModalityProfile`). Para cambiar de proveedor o usar un modelo local se escribe otro adaptador de `MultimodalModel`.
 
@@ -81,19 +81,19 @@ Un modelo que recibe un audio en silencio puede inventar una transcripción vero
 
 Los valores por defecto son conservadores: el silencio digital mide unos -91 dBFS y un micrófono apagado, unos -76; el habla normal grabada con un teléfono tiene picos entre -30 y -6 dBFS, y el ruido de fondo de una habitación tranquila queda cerca de -60. Con -50 solo se descarta lo que es casi silencio, sin arriesgar un audio real en voz baja. Los 0.3 s descartan un clic o un golpe aislado, pero no una palabra corta como «ayuda». `AI_SILENCE_MIN_AUDIBLE_SECONDS=0` desactiva el segundo criterio, y un umbral de -100 desactiva el control.
 
-- **Audio en silencio:** no se llama al modelo. La respuesta es un análisis válido con `transcript: null`, sin observaciones, peligros ni riesgos, `eventType` y `severity` en `undetermined`, `summary` «El audio no tiene sonido audible.» y la limitación «El audio está en silencio o casi en silencio: no se puede saber qué pasa.». En `provenance`, `method` es `"silent_audio"` y `provider`, `model` y `promptVersion` son `null`, para que el backend y la app lo distingan de un análisis del modelo.
+- **Audio en silencio:** no se llama al modelo. La respuesta es un análisis válido con `transcript: null`, sin observaciones, peligros ni riesgos, `eventType` y `severity` en `undetermined`, `summary` «El audio no tiene sonido audible.» y la limitación «El audio está en silencio o casi en silencio: no se puede saber qué pasa.». Además, `usable` es `false` con `unusableReason: "silent"`. En `provenance`, `method` es `"silent_audio"` y `provider`, `model` y `promptVersion` son `null`, para que el backend y la app lo distingan de un análisis del modelo.
 - **Video con la pista en silencio:** con fotogramas, la pista no se extrae ni se envía; el mensaje al modelo dice que el video no tiene sonido audible y que `transcript` debe ser `null`. Con el video completo se agrega el mismo aviso.
 - **Si el modelo igual devuelve una transcripción** de un audio medido como silencio, se descarta y se agrega una limitación que lo explica.
 - **Si ffmpeg no está o la medición falla,** se analiza como antes y se registra una advertencia; quedan las reglas de los prompts.
 
-Los prompts `audio-v2`, `video-v3` y `video-v4` piden transcribir solo el habla que se oye con claridad, sin completar, adivinar ni inventar palabras, y escribir `[inaudible]` en los fragmentos que no se entienden. Sin habla inteligible, `transcript` es `null` y se dice en `limitations`. Lo que dice una persona solo es `basis: "observed"` si de verdad se oyó.
+Los prompts `audio-v4`, `video-v3` y `video-v4` piden transcribir solo el habla que se oye con claridad, sin completar, adivinar ni inventar palabras, y escribir `[inaudible]` en los fragmentos que no se entienden. Sin habla inteligible, `transcript` es `null` y se dice en `limitations`. Lo que dice una persona solo es `basis: "observed"` si de verdad se oyó.
 
 Respuesta `200`:
 
 ```json
 {
   "jobId": "…", "evidenceId": 12, "alertId": 7, "incidentId": 3,
-  "modality": "image", "schemaVersion": "evidence-analysis.v1",
+  "modality": "image", "schemaVersion": "evidence-analysis.v2",
   "analysis": {
     "summary": "Choque entre dos autos en una intersección.",
     "eventType": "traffic_accident",
@@ -104,13 +104,17 @@ Respuesta `200`:
     "severity": {"level": "moderate", "basis": ["Daños frontales visibles en ambos autos."]},
     "limitations": ["El interior de los vehículos no es visible."],
     "transcript": null,
-    "timeline": []
+    "timeline": [],
+    "usable": true,
+    "unusableReason": null
   },
-  "provenance": {"provider": "openrouter", "model": "…", "promptVersion": "image-v2", "generatedAt": "…", "method": "model"}
+  "provenance": {"provider": "openrouter", "model": "…", "promptVersion": "image-v4", "generatedAt": "…", "method": "model"}
 }
 ```
 
 `transcript` aparece en audio y video (con nombres y teléfonos enmascarados) y es `null` si no hay habla inteligible. `timeline` (`startSecond` y `text`) aparece en video. `basis` distingue lo observado de lo inferido. No hay confianza numérica.
+
+Desde `evidence-analysis.v2`, `usable` dice si la evidencia sirve para describir la emergencia. Si es `false`, `unusableReason` dice por qué: `too_dark`, `too_blurry`, `no_emergency_content`, `no_useful_speech` o `silent`. El modelo lo decide con una regla conservadora (ante la duda, sirve), y un `false` sin motivo se toma como `true`. Un audio en silencio es `false` con `silent` sin llamar al modelo. El resumen del incidente no tiene en cuenta las evidencias que no sirven: no llegan al modelo, no se pueden citar y sus peligros no cuentan. Si ninguna sirve y ninguna alerta tiene texto, el resumen dice que todavía no hay información útil, sin llamar al modelo (`method: "no_useful_evidence"`). `usedEvidenceIds` igual incluye todas las recibidas, así que la regla de versiones del backend no cambia. `POST /v1/summaries` acepta análisis de v1 (sin estos campos, cuentan como evidencias que sirven) y de v2.
 
 ### `POST /v1/summaries`: resumen del incidente
 
@@ -130,6 +134,35 @@ El backend envía **todas** las alertas del incidente y **todos** los análisis 
 ```
 
 La respuesta `200` trae `summary` (`summary`, `eventType`, `people`, `hazards`, `findings`, `risks`, `severity`, `conflicts`, `limitations`), `usedEvidenceIds`, `usedAlertIds` y `provenance`. Cada hallazgo, riesgo o contradicción incluye `evidenceIds`, `alertIds` y `corroboratingAlerts`, que es la cantidad de alertas distintas que lo respaldan. Ese número lo calcula el código, no el modelo, y solo con las citas válidas. Si el modelo cita una fuente que no recibió (una evidencia desconocida o una alerta sin descripción ni cantidad), esa cita se descarta; si una afirmación se queda sin ninguna fuente válida, se descarta la afirmación. El resto del resumen se conserva y el servicio registra cuántas citas y afirmaciones descartó, sin su contenido. La respuesta se rechaza con `invalid_model_output` solo si no sirve como resumen (por ejemplo, `summary` vacío o un JSON que no cumple el esquema).
+
+#### `incident-summary.v2`
+
+Desde `incident-summary.v2` el resumen agrega tres campos. Los de v1 no cambian de forma, así que un cliente que solo conoce v1 sigue funcionando.
+
+```json
+"summary": {
+  "summary": "Choque de dos motos con dos heridos; sale humo de un auto.",
+  "keyPoints": [
+    {"kind": "what", "text": "Choque de dos motos."},
+    {"kind": "people", "text": "Dos heridos; uno no se mueve."},
+    {"kind": "hazard", "text": "Sale humo de un auto."},
+    {"kind": "critical", "text": "Conductor atrapado, podría estar inconsciente."}
+  ],
+  "hazards": ["smoke", "fire"],
+  "hazardStates": [
+    {"type": "smoke", "status": "active", "lastReportedAt": "2026-10-04T10:32:00+00:00"},
+    {"type": "fire", "status": "unconfirmed", "lastReportedAt": "2026-10-04T10:20:00+00:00"}
+  ],
+  "resolvedHazards": [{"type": "traffic", "evidenceIds": [], "alertIds": [8]}],
+  "...": "eventType, people, findings, risks, severity, conflicts y limitations, igual que en v1"
+}
+```
+
+- **`keyPoints`** es para la tripulación: hasta cuatro frases cortas, en estilo radio, para la tarjeta de la app y la lectura en voz. El código las ordena por tipo (`what`, `people`, `hazard`, `critical`), deja un solo `what`, recorta cada frase a 120 caracteres y, si el modelo no devuelve ninguna, usa `summary` como `what`. Con una sola evidencia, el `what` es el `summary` de esa evidencia. `summary` sigue existiendo para el panel.
+- **`hazards`** sigue siendo la lista de textos de v1: los peligros que no terminaron, activos primero.
+- **`hazardStates`** dice el estado de cada uno. `active`: el modelo lo da por activo. `unconfirmed`: alguna evidencia lo mencionó y ninguna fuente dijo que terminó, pero el modelo lo omitió; el código lo agrega con la hora de su última mención (`lastReportedAt`, el `receivedAt` más reciente de las evidencias que lo nombran, o `null`).
+- **`resolvedHazards`** son los peligros que terminaron, con las fuentes que lo dicen. Solo cuenta si cita al menos una fuente recibida; si no, el peligro vuelve como `unconfirmed`. Si el modelo da un peligro a la vez por activo y por terminado, queda activo.
+- `entrapment` (persona atrapada) se suma al vocabulario de `hazards`.
 
 `usedEvidenceIds` y `usedAlertIds` son las fuentes que recibió la síntesis, todas válidas porque el pedido se valida al entrar; no dependen de qué citó el modelo.
 
